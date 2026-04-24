@@ -1,26 +1,44 @@
-// The module 'vscode' contains the VS Code extensibility API
-// Import the module and reference it with the alias vscode in your code below
-import * as vscode from 'vscode';
+import * as vscode from "vscode";
+import { parseProject } from "./parser/codeParser";
+import { buildGraph } from "./graph/graphBuilder";
+import { buildTestMap } from "./parser/testMapper";
+import { BlastRadiusPanel } from "./webview/webviewProvider";
 
-// This method is called when your extension is activated
-// Your extension is activated the very first time the command is executed
 export function activate(context: vscode.ExtensionContext) {
+  console.log("Blast Radius extension is now active.");
 
-	// Use the console to output diagnostic information (console.log) and errors (console.error)
-	// This line of code will only be executed once when your extension is activated
-	console.log('Congratulations, your extension "blast-radius" is now active!');
+  const disposable = vscode.commands.registerCommand("blast-radius.open", async () => {
+    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 
-	// The command has been defined in the package.json file
-	// Now provide the implementation of the command with registerCommand
-	// The commandId parameter must match the command field in package.json
-	const disposable = vscode.commands.registerCommand('blast-radius.helloWorld', () => {
-		// The code you place here will be executed every time your command is executed
-		// Display a message box to the user
-		vscode.window.showInformationMessage('Hello World from blast-radius!');
-	});
+    if (!workspaceRoot) {
+      vscode.window.showErrorMessage("No workspace folder open");
+      return;
+    }
 
-	context.subscriptions.push(disposable);
+    vscode.window.showInformationMessage("Building call graph...");
+
+    try {
+      const parseResult = parseProject(workspaceRoot);
+      const graph = buildGraph(parseResult);
+      const testMap = buildTestMap(workspaceRoot, graph);
+
+      const panel = new BlastRadiusPanel(context.extensionUri);
+      panel.show(graph, testMap);
+
+      context.subscriptions.push({
+        dispose: () => panel.dispose(),
+      });
+
+      vscode.window.showInformationMessage(
+        `Graph built: ${graph.nodes.size} nodes, ${parseResult.edges.length} edges`
+      );
+    } catch (error) {
+      vscode.window.showErrorMessage(`Failed to build graph: ${error}`);
+      console.error(error);
+    }
+  });
+
+  context.subscriptions.push(disposable);
 }
 
-// This method is called when your extension is deactivated
 export function deactivate() {}
