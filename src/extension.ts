@@ -1,26 +1,61 @@
-// The module 'vscode' contains the VS Code extensibility API
-// Import the module and reference it with the alias vscode in your code below
-import * as vscode from 'vscode';
+/**
+ * Blast Radius extension entry point.
+ *
+ * Registers the `blast-radius.open` command which:
+ *   1. Parses the workspace TypeScript project
+ *   2. Builds the call graph
+ *   3. Maps test files to source functions
+ *   4. Opens an interactive Cytoscape.js webview panel
+ *   5. Wires node-click events to blast radius computation
+ *
+ * The extension activates lazily — only when the command is first invoked.
+ */
 
-// This method is called when your extension is activated
-// Your extension is activated the very first time the command is executed
+import * as vscode from "vscode";
+import { parseProject } from "./parser/codeParser";
+import { buildGraph } from "./graph/graphBuilder";
+import { buildTestMap } from "./parser/testMapper";
+import { BlastRadiusPanel } from "./webview/webviewProvider";
+
 export function activate(context: vscode.ExtensionContext) {
+  const disposable = vscode.commands.registerCommand(
+    "blast-radius.open",
+    () => {
+      // 1. Resolve workspace root
+      const workspaceFolders = vscode.workspace.workspaceFolders;
+      if (!workspaceFolders || workspaceFolders.length === 0) {
+        vscode.window.showErrorMessage(
+          "Blast Radius: No workspace folder is open.",
+        );
+        return;
+      }
+      const workspaceRoot = workspaceFolders[0].uri.fsPath;
 
-	// Use the console to output diagnostic information (console.log) and errors (console.error)
-	// This line of code will only be executed once when your extension is activated
-	console.log('Congratulations, your extension "blast-radius" is now active!');
+      // 2. Parse the TypeScript project
+      const parseResult = parseProject(workspaceRoot);
 
-	// The command has been defined in the package.json file
-	// Now provide the implementation of the command with registerCommand
-	// The commandId parameter must match the command field in package.json
-	const disposable = vscode.commands.registerCommand('blast-radius.helloWorld', () => {
-		// The code you place here will be executed every time your command is executed
-		// Display a message box to the user
-		vscode.window.showInformationMessage('Hello World from blast-radius!');
-	});
+      // 3. Build the call graph
+      const graph = buildGraph(parseResult);
 
-	context.subscriptions.push(disposable);
+      // 4. Build the test map
+      const testMap = buildTestMap(workspaceRoot, graph);
+
+      // 5. Create the webview panel and show the graph
+      const panel = new BlastRadiusPanel(context.extensionUri);
+      panel.show(graph, testMap);
+
+      // 6. Wire node-click messages to blast radius computation
+      const clickDisposable = panel.onNodeClick((nodeId) => {
+        panel.handleNodeClick(nodeId, graph, testMap);
+      });
+
+      // 7. Push disposables to context.subscriptions for cleanup
+      context.subscriptions.push(panel);
+      context.subscriptions.push(clickDisposable);
+    },
+  );
+
+  context.subscriptions.push(disposable);
 }
 
-// This method is called when your extension is deactivated
 export function deactivate() {}

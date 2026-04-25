@@ -9,13 +9,13 @@
   "categories": [
     "Other"
   ],
-  "activationEvents": [],
+  "activationEvents": ["onCommand:blast-radius.open"],
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
       {
-        "command": "blast-radius.helloWorld",
-        "title": "Hello World"
+        "command": "blast-radius.open",
+        "title": "Blast Radius: Open Graph"
       }
     ]
   },
@@ -28,13 +28,20 @@
     "test": "vscode-test"
   },
   "devDependencies": {
-    "@types/vscode": "^1.116.0",
+    "@types/cytoscape": "^3.21.9",
     "@types/mocha": "^10.0.10",
     "@types/node": "22.x",
-    "typescript-eslint": "^8.56.1",
-    "eslint": "^9.39.3",
-    "typescript": "^5.9.3",
+    "@types/vscode": "^1.116.0",
     "@vscode/test-cli": "^0.0.12",
-    "@vscode/test-electron": "^2.5.2"
+    "@vscode/test-electron": "^2.5.2",
+    "eslint": "^9.39.3",
+    "fast-check": "^4.7.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.56.1"
+  },
+  "dependencies": {
+    "cytoscape": "^3.33.2",
+    "cytoscape-dagre": "^2.5.0",
+    "dagre": "^0.8.5"
   }
 }

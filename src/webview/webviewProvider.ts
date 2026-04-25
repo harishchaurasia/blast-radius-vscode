@@ -1,0 +1,464 @@
+/**
+ * Webview Provider — manages the Blast Radius webview panel lifecycle,
+ * message passing between the extension host and the webview client,
+ * and data privacy enforcement.
+ *
+ * Responsibilities:
+ *   - Create and configure the VSCode webview panel
+ *   - Generate inline HTML that loads Cytoscape assets from `media/`
+ *   - Enforce a strict Content Security Policy (no external network access)
+ *   - Serialize and transmit graph data via `postMessage`
+ *   - Handle incoming `node-click` messages and dispatch blast radius results
+ *   - Verify at initialization that no external network URIs are present
+ */
+
+import * as vscode from "vscode";
+import { computeBlastRadius } from "../analysis/impactEngine";
+import { serializeCallGraph, serializeTestMap } from "../graph/serialization";
+import type {
+  CallGraph,
+  GraphDataMessage,
+  HighlightMessage,
+  NodeClickMessage,
+  TestMap,
+} from "../types";
+
+// ---------------------------------------------------------------------------
+// Data Privacy Enforcement
+// ---------------------------------------------------------------------------
+
+/**
+ * Patterns that indicate an external (non-local) network URI.
+ * Any URI that is NOT a vscode-resource: or file: scheme is considered external.
+ */
+const EXTERNAL_URI_PATTERN = /https?:\/\/|ftp:\/\/|ws:\/\/|wss:\/\//i;
+
+/**
+ * Required CSP directives that must be present in the webview HTML to enforce
+ * data privacy. Each entry is a substring that must appear in the CSP meta tag.
+ */
+const REQUIRED_CSP_DIRECTIVES = [
+  "default-src 'none'", // deny all by default
+  "script-src 'nonce-",  // scripts only via nonce (no external script hosts)
+] as const;
+
+/**
+ * Verify that the provided HTML content does not contain any external network
+ * URIs (http://, https://, ftp://, ws://, wss://).
+ *
+ * Throws an error if any external URI is detected, enforcing Requirement 11.3.
+ *
+ * Exported for use in tests.
+ */
+export function assertNoExternalUris(html: string): void {
+  if (EXTERNAL_URI_PATTERN.test(html)) {
+    throw new Error(
+      "[BlastRadiusPanel] Data privacy violation: external network URI detected in webview HTML. " +
+        "All resources must be served from vscode-resource: or file: schemes only.",
+    );
+  }
+}
+
+/**
+ * Verify that the webview HTML contains the required Content Security Policy
+ * directives that block external network access.
+ *
+ * Checks:
+ *   1. A `<meta http-equiv="Content-Security-Policy">` tag is present.
+ *   2. `default-src 'none'` is set (deny-all baseline).
+ *   3. `script-src` uses a nonce (no external script hosts allowed).
+ *   4. No external network URIs (http/https/ftp/ws/wss) appear anywhere.
+ *
+ * Throws a descriptive error for each violation found.
+ *
+ * Exported for use in tests.
+ */
+export function verifyDataPrivacy(html: string): void {
+  // Check 1: CSP meta tag is present
+  if (!html.includes('http-equiv="Content-Security-Policy"')) {
+    throw new Error(
+      "[BlastRadiusPanel] Data privacy violation: no Content-Security-Policy meta tag found in webview HTML.",
+    );
+  }
+
+  // Check 2 & 3: Required CSP directives are present
+  for (const directive of REQUIRED_CSP_DIRECTIVES) {
+    if (!html.includes(directive)) {
+      throw new Error(
+        `[BlastRadiusPanel] Data privacy violation: required CSP directive missing: "${directive}". ` +
+          "The webview must enforce a strict Content Security Policy.",
+      );
+    }
+  }
+
+  // Check 4: No external network URIs anywhere in the HTML
+  assertNoExternalUris(html);
+}
+
+// ---------------------------------------------------------------------------
+// HTML Generation
+// ---------------------------------------------------------------------------
+
+/**
+ * Generate the inline HTML for the webview panel.
+ *
+ * Loads Cytoscape.js assets from the `media/` directory using webview-safe
+ * URIs. Sets a strict Content Security Policy that restricts:
+ *   - `default-src` to `'none'`
+ *   - `script-src` to the webview nonce and `vscode-resource:` / `file:` schemes
+ *   - `style-src` to `'unsafe-inline'` (needed for Cytoscape inline styles)
+ *   - No `connect-src`, `img-src` from external origins
+ *
+ * @param webview     - The VSCode Webview instance (for URI conversion)
+ * @param extensionUri - The extension's root URI (for resolving media/ paths)
+ * @param nonce       - A cryptographic nonce for the CSP script-src directive
+ */
+function generateHtml(
+  webview: vscode.Webview,
+  extensionUri: vscode.Uri,
+  nonce: string,
+): string {
+  // Resolve media/ asset URIs through the webview so they use the
+  // vscode-resource: scheme required by the CSP.
+  const mediaUri = vscode.Uri.joinPath(extensionUri, "media");
+
+  const cytoscapeUri = webview.asWebviewUri(
+    vscode.Uri.joinPath(mediaUri, "cytoscape.min.js"),
+  );
+  const cytoscapeDagreUri = webview.asWebviewUri(
+    vscode.Uri.joinPath(mediaUri, "cytoscape-dagre.js"),
+  );
+  const dagreUri = webview.asWebviewUri(
+    vscode.Uri.joinPath(mediaUri, "dagre.js"),
+  );
+  const graphJsUri = webview.asWebviewUri(
+    vscode.Uri.joinPath(mediaUri, "graph.js"),
+  );
+
+  // Content Security Policy:
+  //   - default-src 'none'          — deny everything not explicitly allowed
+  //   - script-src 'nonce-{nonce}'  — only scripts with this nonce
+  //   - style-src 'unsafe-inline'   — Cytoscape applies inline styles
+  //   - img-src data:               — Cytoscape may use data URIs for icons
+  const csp = [
+    `default-src 'none'`,
+    `script-src 'nonce-${nonce}'`,
+    `style-src 'unsafe-inline'`,
+    `img-src data:`,
+  ].join("; ");
+
+  return /* html */ `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="${csp}" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Blast Radius</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      display: flex;
+      height: 100vh;
+      overflow: hidden;
+      font-family: var(--vscode-font-family, sans-serif);
+      font-size: var(--vscode-font-size, 13px);
+      color: var(--vscode-foreground, #ccc);
+      background: var(--vscode-editor-background, #1e1e1e);
+    }
+    #cy {
+      flex: 1;
+      height: 100%;
+    }
+    #sidebar {
+      width: 260px;
+      min-width: 200px;
+      height: 100%;
+      overflow-y: auto;
+      padding: 12px;
+      border-left: 1px solid var(--vscode-panel-border, #444);
+      background: var(--vscode-sideBar-background, #252526);
+    }
+    #sidebar h2 {
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 10px;
+      color: var(--vscode-sideBarTitle-foreground, #bbb);
+    }
+    .summary-section { margin-bottom: 14px; }
+    .summary-section h3 {
+      font-size: 11px;
+      font-weight: 600;
+      margin-bottom: 4px;
+      color: var(--vscode-descriptionForeground, #999);
+    }
+    .summary-value {
+      font-size: 20px;
+      font-weight: 700;
+      color: var(--vscode-foreground, #ccc);
+    }
+    .summary-list {
+      list-style: none;
+      font-size: 11px;
+      line-height: 1.6;
+      word-break: break-all;
+    }
+    .summary-list li { padding: 1px 0; }
+    #placeholder {
+      font-size: 11px;
+      color: var(--vscode-descriptionForeground, #888);
+      margin-top: 8px;
+    }
+  </style>
+</head>
+<body>
+  <div id="cy"></div>
+  <div id="sidebar">
+    <h2>Impact Summary</h2>
+    <div id="placeholder">Click a node to see its blast radius.</div>
+    <div id="summary" style="display:none">
+      <div class="summary-section">
+        <h3>Affected Functions</h3>
+        <div class="summary-value" id="affected-count">0</div>
+      </div>
+      <div class="summary-section">
+        <h3>Recommended Tests</h3>
+        <ul class="summary-list" id="test-list"></ul>
+      </div>
+      <div class="summary-section">
+        <h3>At-Risk Modules</h3>
+        <ul class="summary-list" id="module-list"></ul>
+      </div>
+    </div>
+  </div>
+
+  <!-- Cytoscape assets loaded from media/ via vscode-resource: URIs -->
+  <script nonce="${nonce}" src="${dagreUri}"></script>
+  <script nonce="${nonce}" src="${cytoscapeUri}"></script>
+  <script nonce="${nonce}" src="${cytoscapeDagreUri}"></script>
+  <!-- Webview client -->
+  <script nonce="${nonce}" src="${graphJsUri}"></script>
+</body>
+</html>`;
+}
+
+// ---------------------------------------------------------------------------
+// Nonce generation
+// ---------------------------------------------------------------------------
+
+/**
+ * Generate a cryptographically random nonce string for use in the CSP.
+ * Uses `crypto.getRandomValues` (available in the extension host via Node.js).
+ */
+function generateNonce(): string {
+  const array = new Uint8Array(16);
+  // Use Node.js crypto module for nonce generation in the extension host
+  const nodeCrypto = require("crypto") as typeof import("crypto");
+  const buf = nodeCrypto.randomBytes(16);
+  buf.copy(Buffer.from(array.buffer));
+  return Buffer.from(array).toString("base64");
+}
+
+// ---------------------------------------------------------------------------
+// BlastRadiusPanel
+// ---------------------------------------------------------------------------
+
+/**
+ * Manages the Blast Radius webview panel.
+ *
+ * Lifecycle:
+ *   1. Constructed with the extension URI (for resolving media/ assets).
+ *   2. `show(graph, testMap)` creates the panel (or reveals it if already open),
+ *      serializes the graph data, and sends a `graph-data` message.
+ *   3. Incoming `node-click` messages are handled by `handleNodeClick`, which
+ *      computes the blast radius and sends a `highlight` message back.
+ *   4. `dispose()` cleans up the panel and all event listeners.
+ */
+export class BlastRadiusPanel {
+  private panel: vscode.WebviewPanel | undefined;
+  private readonly extensionUri: vscode.Uri;
+  private disposables: vscode.Disposable[] = [];
+
+  constructor(extensionUri: vscode.Uri) {
+    this.extensionUri = extensionUri;
+  }
+
+  // -------------------------------------------------------------------------
+  // Public API
+  // -------------------------------------------------------------------------
+
+  /**
+   * Create (or reveal) the webview panel and send the initial graph data.
+   *
+   * Enforces data privacy by verifying the generated HTML contains no
+   * external network URIs before the panel is shown.
+   */
+  show(graph: CallGraph, testMap: TestMap): void {
+    if (this.panel) {
+      // Panel already exists — reveal it and refresh data
+      this.panel.reveal(vscode.ViewColumn.Beside);
+      this._sendGraphData(graph, testMap);
+      return;
+    }
+
+    // Create the webview panel
+    this.panel = vscode.window.createWebviewPanel(
+      "blastRadius",
+      "Blast Radius",
+      vscode.ViewColumn.Beside,
+      {
+        enableScripts: true,
+        localResourceRoots: [
+          vscode.Uri.joinPath(this.extensionUri, "media"),
+        ],
+        retainContextWhenHidden: true,
+      },
+    );
+
+    // Generate HTML and enforce data privacy BEFORE setting it on the panel
+    const nonce = generateNonce();
+    const html = generateHtml(this.panel.webview, this.extensionUri, nonce);
+    verifyDataPrivacy(html);
+
+    this.panel.webview.html = html;
+
+    // Handle incoming messages from the webview
+    this.panel.webview.onDidReceiveMessage(
+      (message: NodeClickMessage) => {
+        if (message.type === "node-click") {
+          // Defer graph/testMap handling to the registered click handler
+          this._onNodeClickHandlers.forEach((handler) =>
+            handler(message.nodeId),
+          );
+        }
+      },
+      undefined,
+      this.disposables,
+    );
+
+    // Clean up when the panel is closed by the user
+    this.panel.onDidDispose(
+      () => {
+        this.panel = undefined;
+        this._disposeListeners();
+      },
+      undefined,
+      this.disposables,
+    );
+
+    // Send initial graph data
+    this._sendGraphData(graph, testMap);
+  }
+
+  /**
+   * Compute the blast radius for the clicked node and send highlight
+   * instructions to the webview.
+   */
+  handleNodeClick(
+    nodeId: string,
+    graph: CallGraph,
+    testMap: TestMap,
+  ): void {
+    if (!this.panel) {
+      return;
+    }
+
+    const result = computeBlastRadius(nodeId, graph, testMap);
+
+    const message: HighlightMessage = {
+      type: "highlight",
+      selectedNodeId: result.selectedNodeId,
+      downstream: Array.from(result.downstream),
+      upstream: Array.from(result.upstream),
+      linkedTests: result.linkedTests,
+      affectedModules: result.affectedModules,
+      affectedCount: result.affectedCount,
+    };
+
+    this.panel.webview.postMessage(message);
+  }
+
+  /**
+   * Register a callback to be invoked when the webview sends a `node-click`
+   * message. The callback receives the clicked node ID.
+   *
+   * Returns a disposable that removes the handler when disposed.
+   */
+  onNodeClick(handler: (nodeId: string) => void): vscode.Disposable {
+    this._onNodeClickHandlers.push(handler);
+    return new vscode.Disposable(() => {
+      const idx = this._onNodeClickHandlers.indexOf(handler);
+      if (idx !== -1) {
+        this._onNodeClickHandlers.splice(idx, 1);
+      }
+    });
+  }
+
+  /**
+   * Dispose the panel and all associated resources.
+   */
+  dispose(): void {
+    if (this.panel) {
+      this.panel.dispose();
+      this.panel = undefined;
+    }
+    this._disposeListeners();
+  }
+
+  // -------------------------------------------------------------------------
+  // Private helpers
+  // -------------------------------------------------------------------------
+
+  private _onNodeClickHandlers: Array<(nodeId: string) => void> = [];
+
+  /**
+   * Serialize graph + test map and post a `graph-data` message to the webview.
+   */
+  private _sendGraphData(graph: CallGraph, testMap: TestMap): void {
+    if (!this.panel) {
+      return;
+    }
+
+    const serializedGraph = serializeCallGraph(graph);
+    const serializedTestMap = serializeTestMap(testMap);
+
+    // Build the testFiles array for the webview
+    const testFiles = serializedTestMap.entries.map((entry) => ({
+      path: entry.testFile,
+      linkedNodeIds: entry.functionNodeIds,
+    }));
+
+    // Collect all unique feature modules from graph nodes
+    const moduleSet = new Set<string>();
+    for (const node of serializedGraph.nodes) {
+      const match = node.filePath
+        .replace(/\\/g, "/")
+        .match(/(?:^|\/)src\/([^/]+)\//);
+      if (match) {
+        moduleSet.add(match[1]);
+      }
+    }
+
+    const message: GraphDataMessage = {
+      type: "graph-data",
+      nodes: serializedGraph.nodes,
+      edges: serializedGraph.edges,
+      testFiles,
+      featureModules: Array.from(moduleSet).sort(),
+    };
+
+    this.panel.webview.postMessage(message);
+  }
+
+  /**
+   * Dispose all registered event listener disposables.
+   */
+  private _disposeListeners(): void {
+    for (const d of this.disposables) {
+      d.dispose();
+    }
+    this.disposables = [];
+    this._onNodeClickHandlers = [];
+  }
+}
