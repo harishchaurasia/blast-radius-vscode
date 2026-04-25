@@ -36,12 +36,10 @@
 
   // Dev mode: simulate backend highlight response on node click
   function handleDevMessage(msg) {
-    if (msg.type === "node-click" && typeof MOCK_HIGHLIGHTS !== "undefined") {
-      var highlight = MOCK_HIGHLIGHTS[msg.nodeId];
-      if (highlight) {
-        applyHighlight(highlight);
+    if (msg.type === "node-click") {
+      if (typeof MOCK_HIGHLIGHTS !== "undefined" && MOCK_HIGHLIGHTS[msg.nodeId]) {
+        applyHighlight(MOCK_HIGHLIGHTS[msg.nodeId]);
       } else {
-        // Auto-generate a basic highlight from the graph structure
         applyHighlight(generateDevHighlight(msg.nodeId));
       }
     }
@@ -105,7 +103,11 @@
     });
 
     cy.on("tap", "node", (event) => {
-      const nodeId = event.target.id();
+      const node = event.target;
+      const nodeType = node.data("type");
+      // Ignore clicks on file box parents
+      if (nodeType === "file") { return; }
+      const nodeId = node.id();
       selectedNodeId = nodeId;
       vscodeApi.postMessage({ type: "node-click", nodeId: nodeId });    });
 
@@ -180,19 +182,26 @@
       }
     }
 
-    // Create test file parent nodes
+    // Create test file nodes — no parent box, they float freely
     for (var t = 0; t < data.testFiles.length; t++) {
-      var tfp = data.testFiles[t].path;
-      if (!seenFiles[tfp]) {
-        seenFiles[tfp] = true;
-        var tmod = getModuleFromPath(tfp);
+      var testFile = data.testFiles[t];
+      var tmod2 = getModuleFromPath(testFile.path);
+      elements.push({
+        data: {
+          id: testFile.path,
+          label: testFile.path.split("/").pop(),
+          filePath: testFile.path,
+          type: "test",
+          module: tmod2,
+          impactLevel: "none",
+        },
+      });
+      for (var l = 0; l < testFile.linkedNodeIds.length; l++) {
         elements.push({
           data: {
-            id: "file::" + tfp,
-            label: tfp.split("/").pop(),
-            filePath: tfp,
-            type: "file-test",
-            module: tmod,
+            id: "e-" + testFile.path + "--" + testFile.linkedNodeIds[l],
+            source: testFile.path,
+            target: testFile.linkedNodeIds[l],
           },
         });
       }
@@ -218,32 +227,6 @@
       });
     }
 
-    // Create test file child nodes
-    for (var k = 0; k < data.testFiles.length; k++) {
-      var testFile = data.testFiles[k];
-      var tmod2 = getModuleFromPath(testFile.path);
-      elements.push({
-        data: {
-          id: testFile.path,
-          label: testFile.path.split("/").pop(),
-          filePath: testFile.path,
-          parent: "file::" + testFile.path,
-          type: "test",
-          module: tmod2,
-          impactLevel: "none",
-        },
-      });
-      for (var l = 0; l < testFile.linkedNodeIds.length; l++) {
-        elements.push({
-          data: {
-            id: "e-" + testFile.path + "--" + testFile.linkedNodeIds[l],
-            source: testFile.path,
-            target: testFile.linkedNodeIds[l],
-          },
-        });
-      }
-    }
-
     // Edges between function nodes
     for (var e = 0; e < data.edges.length; e++) {
       var edge = data.edges[e];
@@ -266,61 +249,67 @@
   function runLayout() {
     if (!cy) { return; }
 
-    // Manual grid layout for compound nodes.
-    // cose doesn't handle compound nodes well — we position file boxes
-    // in a grid and let children sit inside them.
-
-    var fileNodes = cy.nodes("[type='file'], [type='file-test']");
-    var count = fileNodes.length;
+    var orphans = cy.nodes(":orphan");
+    var count = orphans.length;
     if (count === 0) { return; }
 
-    var cols = Math.ceil(Math.sqrt(count * 1.6)); // wider than tall
-    var boxW = 160;
-    var boxH = 120;
-    var gapX = 60;
-    var gapY = 60;
-    var startX = 80;
-    var startY = 80;
+    // Scatter top-level nodes randomly across a wide canvas
+    var canvasW = Math.max(900, count * 28);
+    var canvasH = Math.max(650, count * 20);
+    // Use a seeded-ish shuffle so same data gives same layout on reload,
+    // but still looks organic. Simple approach: place in a jittered grid.
+    var cols = Math.ceil(Math.sqrt(count * 1.5));
+    var cellW = canvasW / cols;
+    var cellH = canvasH / Math.ceil(count / cols);
 
-    // Sort file nodes so same-module files are adjacent
-    var sorted = fileNodes.sort(function (a, b) {
-      var ma = a.data("module") || "";
-      var mb = b.data("module") || "";
-      return ma < mb ? -1 : ma > mb ? 1 : 0;
+    // Shuffle the order so same-module files aren't always adjacent
+    var indices = [];
+    for (var s = 0; s < count; s++) { indices.push(s); }
+    // Fisher-Yates with a fixed seed based on node ids for stability
+    var seed = 0;
+    orphans.forEach(function(n) {
+      for (var c = 0; c < n.id().length; c++) { seed += n.id().charCodeAt(c); }
+    });
+    function rand() { seed = (seed * 1664525 + 1013904223) & 0xffffffff; return Math.abs(seed) / 0x7fffffff; }
+    for (var i = indices.length - 1; i > 0; i--) {
+      var j = Math.floor(rand() * (i + 1));
+      var tmp = indices[i]; indices[i] = indices[j]; indices[j] = tmp;
+    }
+
+    orphans.forEach(function (node, idx) {
+      var slot = indices[idx];
+      var col = slot % cols;
+      var row = Math.floor(slot / cols);
+      // Small fixed offsets based on slot to break the grid feel without overlapping
+      var offsetX = (slot % 3 - 1) * 20;
+      var offsetY = (Math.floor(slot / 3) % 3 - 1) * 15;
+      node.position({
+        x: cellW * col + cellW / 2 + offsetX,
+        y: cellH * row + cellH / 2 + offsetY,
+      });
     });
 
-    var positions = {};
-    sorted.forEach(function (fileNode, idx) {
-      var col = idx % cols;
-      var row = Math.floor(idx / cols);
-      var cx = startX + col * (boxW + gapX) + boxW / 2;
-      var cy_ = startY + row * (boxH + gapY) + boxH / 2;
-      positions[fileNode.id()] = { x: cx, y: cy_ };
-
-      // Position children in a small grid inside the box
+    // Position children inside each file box
+    cy.nodes("[type='file']").forEach(function (fileNode) {
       var children = fileNode.children();
       var childCount = children.length;
       if (childCount === 0) { return; }
+
+      var pos = fileNode.position();
       var childCols = Math.ceil(Math.sqrt(childCount));
-      var childSpacingX = Math.min(50, (boxW - 20) / childCols);
-      var childSpacingY = Math.min(40, (boxH - 30) / Math.ceil(childCount / childCols));
-      var childStartX = cx - (childCols - 1) * childSpacingX / 2;
-      var childStartY = cy_ - (Math.ceil(childCount / childCols) - 1) * childSpacingY / 2 + 8;
+      var spacingX = 48;
+      var spacingY = 44;
+      var totalW = (childCols - 1) * spacingX;
+      var totalH = (Math.ceil(childCount / childCols) - 1) * spacingY;
 
       children.forEach(function (child, ci) {
         var cc = ci % childCols;
         var cr = Math.floor(ci / childCols);
-        positions[child.id()] = {
-          x: childStartX + cc * childSpacingX,
-          y: childStartY + cr * childSpacingY,
-        };
+        child.position({
+          x: pos.x - totalW / 2 + cc * spacingX,
+          y: pos.y - totalH / 2 + cr * spacingY + 8,
+        });
       });
-    });
-
-    cy.nodes().forEach(function (node) {
-      if (positions[node.id()]) {
-        node.position(positions[node.id()]);
-      }
     });
 
     cy.fit(undefined, 60);
@@ -352,27 +341,26 @@
           shape: "roundrectangle",
         },
       },
+      // ── Test nodes (floating, no parent box) ──
       {
-        selector: "node[type='file-test']",
+        selector: "node[type='test']",
         style: {
           "background-color": "#48bb78",
-          "background-opacity": 0.1,
           "border-color": "#68d391",
-          "border-width": 2,
-          "border-opacity": 0.6,
           label: "data(label)",
-          "text-valign": "top",
+          "text-valign": "bottom",
           "text-halign": "center",
-          "font-size": "11px",
-          "font-weight": "600",
+          "font-size": "10px",
           color: textColor,
-          "text-outline-width": 0,
-          "text-margin-y": -6,
-          "padding": "14px",
-          shape: "roundrectangle",
+          "text-outline-width": 2,
+          "text-outline-color": outlineColor,
+          "text-margin-y": 4,
+          shape: "diamond",
+          width: 22,
+          height: 22,
+          "border-width": 2,
         },
       },
-      // ── Function nodes (children) ──
       {
         selector: "node[type='function']",
         style: {
@@ -391,26 +379,6 @@
           "border-width": 2,
           "transition-property": "background-color, border-color, opacity, width, height",
           "transition-duration": "0.2s",
-        },
-      },
-      // ── Test nodes (children of test file boxes) ──
-      {
-        selector: "node[type='test']",
-        style: {
-          "background-color": "#48bb78",
-          "border-color": "#68d391",
-          label: "data(label)",
-          "text-valign": "bottom",
-          "text-halign": "center",
-          "font-size": "10px",
-          color: textColor,
-          "text-outline-width": 2,
-          "text-outline-color": outlineColor,
-          "text-margin-y": 4,
-          shape: "diamond",
-          width: 22,
-          height: 22,
-          "border-width": 2,
         },
       },
       // ── Impact level overrides ──
@@ -457,6 +425,14 @@
         style: { "line-color": "#a0aec0", "target-arrow-color": "#a0aec0", opacity: 1, width: 2 },
       },
       {
+        selector: "edge.callee-edge",
+        style: { "line-color": "#fc8181", "target-arrow-color": "#fc8181", opacity: 1, width: 2 },
+      },
+      {
+        selector: "edge.caller-edge",
+        style: { "line-color": "#63b3ed", "target-arrow-color": "#63b3ed", opacity: 1, width: 2 },
+      },
+      {
         selector: "edge.dimmed",
         style: { opacity: 0.05 },
       },
@@ -498,10 +474,16 @@
     cy.edges().forEach(function (edge) {
       var src = edge.source().id();
       var tgt = edge.target().id();
-      if (highlightedIds.has(src) && highlightedIds.has(tgt)) {
-        edge.removeClass("dimmed").addClass("highlighted");
+      if (!highlightedIds.has(src) || !highlightedIds.has(tgt)) {
+        edge.removeClass("highlighted callee-edge caller-edge").addClass("dimmed");
+        return;
+      }
+      edge.removeClass("dimmed");
+      // Color by direction relative to selected node
+      if (src === data.selectedNodeId || downstreamSet.has(src)) {
+        edge.removeClass("caller-edge").addClass("callee-edge");
       } else {
-        edge.removeClass("highlighted").addClass("dimmed");
+        edge.removeClass("callee-edge").addClass("caller-edge");
       }
     });
 
@@ -582,7 +564,7 @@
         n.data("impactLevel", "none");
       }
     });
-    cy.edges().removeClass("highlighted dimmed");
+    cy.edges().removeClass("highlighted dimmed callee-edge caller-edge");
     clearSidebar();
     showModuleLegend();
   }

@@ -323,6 +323,9 @@ export class BlastRadiusPanel {
         <div class="legend-item"><div class="legend-dot dot-orange"></div> medium</div>
         <div class="legend-item"><div class="legend-dot dot-blue"></div> low</div>
         <div class="legend-item"><div class="legend-dot dot-green"></div> test</div>
+        <div class="legend-sep"></div>
+        <div class="legend-item"><div style="width:18px;height:3px;background:#fc8181;border-radius:2px"></div> callee</div>
+        <div class="legend-item"><div style="width:18px;height:3px;background:#63b3ed;border-radius:2px"></div> caller</div>
       </div>
     </div>
   </div>
