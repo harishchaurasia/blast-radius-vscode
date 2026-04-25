@@ -153,7 +153,7 @@ export class BlastRadiusPanel {
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
     body {
-      display: flex;
+      position: relative;
       height: 100vh;
       overflow: hidden;
       font-family: var(--vscode-font-family, 'Segoe UI', sans-serif);
@@ -164,8 +164,8 @@ export class BlastRadiusPanel {
 
     /* ── Graph canvas ── */
     #cy-wrap {
-      flex: 1;
-      position: relative;
+      position: absolute;
+      inset: 0;
       overflow: hidden;
     }
     #cy { width: 100%; height: 100%; }
@@ -187,19 +187,52 @@ export class BlastRadiusPanel {
     /* ── Legend ── */
     #legend {
       position: absolute;
-      bottom: 10px;
-      left: 10px;
+      bottom: 20px;
+      left: 20px;
       display: flex;
-      gap: 10px;
-      background: var(--vscode-editor-background);
-      padding: 5px 10px;
-      border-radius: 4px;
+      flex-direction: column;
+      gap: 8px;
+      background: var(--vscode-sideBar-background);
+      padding: 10px 14px;
+      border-radius: 6px;
       border: 1px solid var(--vscode-panel-border);
+      box-shadow: 0 4px 20px rgba(0,0,0,0.3);
       font-size: 10px;
       color: var(--vscode-foreground);
+      z-index: 50;
     }
-    .legend-item { display: flex; align-items: center; gap: 4px; }
-    .legend-dot { width: 8px; height: 8px; border-radius: 50%; }
+    #legend.minimized .legend-columns,
+    #legend.minimized #impact-legend { display: none !important; }
+    .legend-columns {
+      display: flex;
+      gap: 16px;
+    }
+    .legend-col {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .legend-col-title {
+      font-size: 9px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--vscode-descriptionForeground);
+      margin-bottom: 2px;
+    }
+    #legend-toggle {
+      background: none;
+      border: none;
+      color: var(--vscode-foreground);
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      padding: 0 0 4px 0;
+      text-align: left;
+    }
+    #legend-toggle:hover { color: var(--vscode-textLink-foreground); }
+    .legend-item { display: flex; align-items: center; gap: 6px; }
+    .legend-dot { width: 12px; height: 12px; border-radius: 50%; }
     .dot-yellow { background: #f6e05e; }
     .dot-red    { background: #fc8181; }
     .dot-orange { background: #f6ad55; }
@@ -208,13 +241,26 @@ export class BlastRadiusPanel {
 
     /* ── Sidebar ── */
     #sidebar {
+      position: absolute;
+      top: 50%;
+      right: 20px;
+      transform: translateY(-50%);
       width: 280px;
-      flex-shrink: 0;
-      display: flex;
+      max-height: calc(100vh - 40px);
+      display: none;
       flex-direction: column;
       overflow: hidden;
       background: var(--vscode-sideBar-background);
-      border-left: 1px solid var(--vscode-panel-border);
+      border: 1px solid var(--vscode-panel-border);
+      border-radius: 6px;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+      z-index: 50;
+    }
+    #sidebar.visible {
+      display: flex;
+    }
+    #sidebar.visible {
+      display: flex;
     }
     #sidebar-scroll {
       flex: 1;
@@ -279,6 +325,24 @@ export class BlastRadiusPanel {
 
     /* Test item */
     .test-item .item-name { color: #68d391; }
+    .test-item .item-path {
+      display: inline-block;
+      max-width: 160px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      transition: none;
+    }
+    .test-item:hover .item-path {
+      animation: scrollText 4s linear infinite;
+      text-overflow: clip;
+    }
+    @keyframes scrollText {
+      0%   { transform: translateX(0); }
+      10%  { transform: translateX(0); }
+      90%  { transform: translateX(calc(-100% + 160px)); }
+      100% { transform: translateX(calc(-100% + 160px)); }
+    }
 
     /* Sidebar empty state */
     #sidebar-empty { padding: 20px 14px; color: var(--vscode-descriptionForeground); line-height: 1.6; }
@@ -316,14 +380,25 @@ export class BlastRadiusPanel {
       <p>No graph data — open a TypeScript workspace and run <strong>Blast Radius: Open Graph</strong></p>
     </div>
     <div id="legend">
-      <div id="module-legend" style="display:flex;gap:10px;flex-wrap:wrap;align-items:center"></div>
-      <div id="impact-legend" style="display:none;gap:10px;align-items:center">
+      <button id="legend-toggle">▾ legend</button>
+      <div class="legend-columns">
+        <div class="legend-col">
+          <div class="legend-col-title">Modules</div>
+          <div id="module-legend" style="display:flex;flex-direction:column;gap:4px"></div>
+        </div>
+        <div class="legend-col" id="shapes-col">
+          <div class="legend-col-title">Node Type</div>
+          <div id="shapes-legend" style="display:flex;flex-direction:column;gap:4px"></div>
+        </div>
+      </div>
+      <div id="impact-legend" style="display:none;flex-direction:column;gap:4px">
+        <div class="legend-col-title">Impact</div>
         <div class="legend-item"><div class="legend-dot dot-yellow"></div> selected</div>
         <div class="legend-item"><div class="legend-dot dot-red"></div> high</div>
         <div class="legend-item"><div class="legend-dot dot-orange"></div> medium</div>
         <div class="legend-item"><div class="legend-dot dot-blue"></div> low</div>
         <div class="legend-item"><div class="legend-dot dot-green"></div> test</div>
-        <div class="legend-sep"></div>
+        <div style="height:1px;width:100%;background:var(--vscode-panel-border);margin:2px 0"></div>
         <div class="legend-item"><div style="width:18px;height:3px;background:#fc8181;border-radius:2px"></div> callee</div>
         <div class="legend-item"><div style="width:18px;height:3px;background:#63b3ed;border-radius:2px"></div> caller</div>
       </div>
@@ -350,8 +425,8 @@ export class BlastRadiusPanel {
           <div class="section-title">Blast Summary</div>
           <div class="blast-row">
             <div class="blast-stat"><div class="num" id="count-impacted">0</div><div class="lbl">impacted</div></div>
-            <div class="blast-stat"><div class="num" id="count-callers">0</div><div class="lbl">callers</div></div>
-            <div class="blast-stat"><div class="num" id="count-callees">0</div><div class="lbl">callees</div></div>
+            <div class="blast-stat"><div class="num" id="count-callers">0</div><div class="lbl">upstream</div></div>
+            <div class="blast-stat"><div class="num" id="count-callees">0</div><div class="lbl">downstream</div></div>
           </div>
           <div class="impact-bar">
             <div id="bar-high" style="width:0%"></div>
@@ -362,12 +437,12 @@ export class BlastRadiusPanel {
         </div>
 
         <div class="section">
-          <div class="section-title">Incoming</div>
+          <div class="section-title">Upstream</div>
           <ul id="callers-list"></ul>
         </div>
 
         <div class="section">
-          <div class="section-title">Outgoing</div>
+          <div class="section-title">Downstream</div>
           <ul id="callees-list"></ul>
         </div>
 

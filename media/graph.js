@@ -207,11 +207,28 @@
       }
     }
 
+    // Count connections per node for sizing
+    var connectionCount = {};
+    for (var e = 0; e < data.edges.length; e++) {
+      var edge = data.edges[e];
+      connectionCount[edge.callerId] = (connectionCount[edge.callerId] || 0) + 1;
+      connectionCount[edge.calleeId] = (connectionCount[edge.calleeId] || 0) + 1;
+    }
+    for (var tf = 0; tf < data.testFiles.length; tf++) {
+      for (var tl = 0; tl < data.testFiles[tf].linkedNodeIds.length; tl++) {
+        var linked = data.testFiles[tf].linkedNodeIds[tl];
+        connectionCount[linked] = (connectionCount[linked] || 0) + 1;
+      }
+    }
+
     // Create function child nodes — parented to their file box
     for (var j = 0; j < data.nodes.length; j++) {
       var node = data.nodes[j];
       var mod2 = getModuleFromPath(node.filePath);
       var colorIdx2 = moduleColorIndex[mod2] || 0;
+      var conns = connectionCount[node.id] || 0;
+      // Scale: min 18, max 56, based on connection count
+      var nodeSize = Math.min(56, Math.max(18, 18 + conns * 7));
       elements.push({
         data: {
           id: node.id,
@@ -219,10 +236,13 @@
           filePath: node.filePath,
           parent: "file::" + node.filePath,
           type: "function",
+          kind: node.kind || "function",
+          exported: node.exported || false,
           module: mod2,
           moduleColorBg: MODULE_COLORS[colorIdx2].bg,
           moduleColorBorder: MODULE_COLORS[colorIdx2].border,
           impactLevel: "none",
+          nodeSize: nodeSize,
         },
       });
     }
@@ -253,41 +273,92 @@
     var count = orphans.length;
     if (count === 0) { return; }
 
-    // Scatter top-level nodes randomly across a wide canvas
-    var canvasW = Math.max(900, count * 28);
-    var canvasH = Math.max(650, count * 20);
-    // Use a seeded-ish shuffle so same data gives same layout on reload,
-    // but still looks organic. Simple approach: place in a jittered grid.
-    var cols = Math.ceil(Math.sqrt(count * 1.5));
-    var cellW = canvasW / cols;
-    var cellH = canvasH / Math.ceil(count / cols);
+    // Group orphan nodes by module
+    var moduleGroups = {};
+    orphans.forEach(function (node) {
+      var mod = node.data("module") || "other";
+      if (!moduleGroups[mod]) { moduleGroups[mod] = []; }
+      moduleGroups[mod].push(node);
+    });
 
-    // Shuffle the order so same-module files aren't always adjacent
-    var indices = [];
-    for (var s = 0; s < count; s++) { indices.push(s); }
-    // Fisher-Yates with a fixed seed based on node ids for stability
+    var moduleNames = Object.keys(moduleGroups).sort();
+    var numModules = moduleNames.length;
+
+    // Calculate zone sizes based on file count per module
+    var baseZoneW = 250;
+    var baseZoneH = 200;
+    var perFileW = 110;
+    var perFileH = 90;
+    var zonePadding = 40;
+
+    // First pass: compute zone sizes and total layout dimensions
+    // Seeded random for consistent layout
     var seed = 0;
     orphans.forEach(function(n) {
       for (var c = 0; c < n.id().length; c++) { seed += n.id().charCodeAt(c); }
     });
     function rand() { seed = (seed * 1664525 + 1013904223) & 0xffffffff; return Math.abs(seed) / 0x7fffffff; }
-    for (var i = indices.length - 1; i > 0; i--) {
-      var j = Math.floor(rand() * (i + 1));
-      var tmp = indices[i]; indices[i] = indices[j]; indices[j] = tmp;
+
+    var zoneInfo = [];
+    for (var mi = 0; mi < moduleNames.length; mi++) {
+      var mod = moduleNames[mi];
+      var group = moduleGroups[mod];
+      var fileCols = Math.ceil(Math.sqrt(group.length));
+      var fileRows = Math.ceil(group.length / fileCols);
+      var w = baseZoneW + fileCols * perFileW;
+      var h = baseZoneH + fileRows * perFileH;
+      zoneInfo.push({ mod: mod, group: group, w: w, h: h, fileCols: fileCols });
     }
 
-    orphans.forEach(function (node, idx) {
-      var slot = indices[idx];
-      var col = slot % cols;
-      var row = Math.floor(slot / cols);
-      // Small fixed offsets based on slot to break the grid feel without overlapping
-      var offsetX = (slot % 3 - 1) * 20;
-      var offsetY = (Math.floor(slot / 3) % 3 - 1) * 15;
-      node.position({
-        x: cellW * col + cellW / 2 + offsetX,
-        y: cellH * row + cellH / 2 + offsetY,
-      });
-    });
+    // Arrange zones in rows, wrapping when too wide
+    var maxRowW = 1200;
+    var zoneGap = 30;
+    var rows = [[]];
+    var rowWidths = [0];
+    for (var zi = 0; zi < zoneInfo.length; zi++) {
+      var z = zoneInfo[zi];
+      var currentRow = rows.length - 1;
+      if (rowWidths[currentRow] + z.w + zoneGap > maxRowW && rows[currentRow].length > 0) {
+        rows.push([]);
+        rowWidths.push(0);
+        currentRow++;
+      }
+      rows[currentRow].push(zi);
+      rowWidths[currentRow] += z.w + zoneGap;
+    }
+
+    // Position zones
+    var yOffset = 0;
+    for (var ri = 0; ri < rows.length; ri++) {
+      var rowMaxH = 0;
+      var xOffset = 0;
+      for (var rj = 0; rj < rows[ri].length; rj++) {
+        var zIdx = rows[ri][rj];
+        var zone = zoneInfo[zIdx];
+        var group = zone.group;
+        var zoneCx = xOffset + zone.w / 2;
+        var zoneCy = yOffset + zone.h / 2;
+
+        // Place files within this zone
+        var fileCols = zone.fileCols;
+        var fileSpacingX = (zone.w - zonePadding * 2) / Math.max(fileCols, 1);
+        var fileSpacingY = (zone.h - zonePadding * 2) / Math.max(Math.ceil(group.length / fileCols), 1);
+
+        for (var fi = 0; fi < group.length; fi++) {
+          var fc = fi % fileCols;
+          var fr = Math.floor(fi / fileCols);
+          var jitterX = (rand() - 0.5) * Math.min(fileSpacingX * 0.2, 30);
+          var jitterY = (rand() - 0.5) * Math.min(fileSpacingY * 0.2, 25);
+          var x = zoneCx - (zone.w - zonePadding * 2) / 2 + fc * fileSpacingX + fileSpacingX / 2 + jitterX;
+          var y = zoneCy - (zone.h - zonePadding * 2) / 2 + fr * fileSpacingY + fileSpacingY / 2 + jitterY;
+          group[fi].position({ x: x, y: y });
+        }
+
+        xOffset += zone.w + zoneGap;
+        if (zone.h > rowMaxH) { rowMaxH = zone.h; }
+      }
+      yOffset += rowMaxH + zoneGap;
+    }
 
     // Position children inside each file box
     cy.nodes("[type='file']").forEach(function (fileNode) {
@@ -297,8 +368,14 @@
 
       var pos = fileNode.position();
       var childCols = Math.ceil(Math.sqrt(childCount));
-      var spacingX = 48;
-      var spacingY = 44;
+
+      var maxSize = 26;
+      children.forEach(function (child) {
+        var s = child.data("nodeSize") || 26;
+        if (s > maxSize) { maxSize = s; }
+      });
+      var spacingX = maxSize + 20;
+      var spacingY = maxSize + 16;
       var totalW = (childCols - 1) * spacingX;
       var totalH = (Math.ceil(childCount / childCols) - 1) * spacingY;
 
@@ -374,12 +451,22 @@
           "text-outline-width": 2,
           "text-outline-color": outlineColor,
           "text-margin-y": 4,
-          width: 26,
-          height: 26,
+          width: "data(nodeSize)",
+          height: "data(nodeSize)",
           "border-width": 2,
           "transition-property": "background-color, border-color, opacity, width, height",
           "transition-duration": "0.2s",
         },
+      },
+      // Shape by function kind
+      {
+        selector: "node[kind='method']",
+        style: { shape: "round-rectangle" },
+      },
+      // Exported = solid fill (default). Internal = hollow outline.
+      {
+        selector: "node[type='function'][!exported]",
+        style: { "background-opacity": 0.15, "border-width": 3 },
       },
       // ── Impact level overrides ──
       {
@@ -426,15 +513,15 @@
       },
       {
         selector: "edge.callee-edge",
-        style: { "line-color": "#fc8181", "target-arrow-color": "#fc8181", opacity: 1, width: 2 },
+        style: { "line-color": "#fc8181", "target-arrow-color": "#fc8181", opacity: 1, width: 2, "z-index": 10 },
       },
       {
         selector: "edge.caller-edge",
-        style: { "line-color": "#63b3ed", "target-arrow-color": "#63b3ed", opacity: 1, width: 2 },
+        style: { "line-color": "#63b3ed", "target-arrow-color": "#63b3ed", opacity: 1, width: 2, "z-index": 10 },
       },
       {
         selector: "edge.dimmed",
-        style: { opacity: 0.05 },
+        style: { opacity: 0.05, "z-index": 0 },
       },
     ];
   }
@@ -572,16 +659,16 @@
   // ── Legend ──
 
   function showModuleLegend() {
-    var container = document.getElementById("module-legend");
+    var columns = document.querySelector(".legend-columns");
     var impactLegend = document.getElementById("impact-legend");
-    if (container) { container.style.display = "flex"; }
+    if (columns) { columns.style.display = "flex"; }
     if (impactLegend) { impactLegend.style.display = "none"; }
   }
 
   function showImpactLegend() {
-    var container = document.getElementById("module-legend");
+    var columns = document.querySelector(".legend-columns");
     var impactLegend = document.getElementById("impact-legend");
-    if (container) { container.style.display = "none"; }
+    if (columns) { columns.style.display = "none"; }
     if (impactLegend) { impactLegend.style.display = "flex"; }
   }
 
@@ -598,14 +685,33 @@
       var idx = window.__blastModuleColors[mod] || 0;
       var item = document.createElement("div");
       item.className = "legend-item";
-      item.innerHTML = '<div class="legend-dot" style="background:' + COLORS[idx] + ';opacity:0.5;border:2px solid ' + COLORS[idx] + '"></div> ' + mod + '/';
+      item.innerHTML = '<div class="legend-dot" style="background:' + COLORS[idx] + '"></div> ' + mod + '/';
       container.appendChild(item);
     }
-    // Add test dot
+    // Test files in module column
     var testItem = document.createElement("div");
     testItem.className = "legend-item";
-    testItem.innerHTML = '<div class="legend-dot dot-green"></div> test files';
+    testItem.innerHTML = '<div class="legend-dot dot-green" style="clip-path:polygon(50% 0%,100% 50%,50% 100%,0% 50%)"></div> test files';
     container.appendChild(testItem);
+
+    // Shapes column
+    var shapesContainer = document.getElementById("shapes-legend");
+    if (shapesContainer) {
+      shapesContainer.innerHTML = "";
+      var shapes = [
+        { label: "exported fn", html: '<div style="width:14px;height:14px;border-radius:50%;background:#888"></div>' },
+        { label: "internal fn", html: '<div style="width:14px;height:14px;border-radius:50%;background:transparent;border:2px solid #888"></div>' },
+        { label: "exported method", html: '<div style="width:14px;height:14px;border-radius:3px;background:#888"></div>' },
+        { label: "internal method", html: '<div style="width:14px;height:14px;border-radius:3px;background:transparent;border:2px solid #888"></div>' },
+      ];
+      for (var s = 0; s < shapes.length; s++) {
+        var sItem = document.createElement("div");
+        sItem.className = "legend-item";
+        sItem.innerHTML = shapes[s].html + " " + shapes[s].label;
+        shapesContainer.appendChild(sItem);
+      }
+    }
+
     showModuleLegend();
   }
 
@@ -661,6 +767,7 @@
 
     document.getElementById("sidebar-empty").style.display = "none";
     document.getElementById("sidebar-content").style.display = "block";
+    document.getElementById("sidebar").classList.add("visible");
   }
 
   function renderNodeList(containerId, nodeIds, role) {
@@ -676,7 +783,7 @@
       var filePath = id.split("#")[0] || "";
       var li = document.createElement("li");
       li.className = "list-item node-item";
-      li.innerHTML = '<span class="item-name">' + label + '</span><span class="item-path">' + filePath + '</span><span class="item-role">' + (role === "caller" ? "calls this" : "called by") + "</span>";
+      li.innerHTML = '<span class="item-name">' + label + '</span><span class="item-path">' + filePath + '</span><span class="item-role">' + (role === "caller" ? "upstream" : "downstream") + "</span>";
       (function (nodeId) {
         li.addEventListener("click", function () {
           selectedNodeId = nodeId;
@@ -691,6 +798,7 @@
     document.getElementById("epicenter-label").style.display = "none";
     document.getElementById("sidebar-empty").style.display = "block";
     document.getElementById("sidebar-content").style.display = "none";
+    document.getElementById("sidebar").classList.remove("visible");
   }
 
   function updateEmptyState() {
@@ -708,6 +816,13 @@
     if (selectedNodeId) {
       vscodeApi.postMessage({ type: "jump-to-source", nodeId: selectedNodeId });
     }
+  });
+
+  // Legend minimize toggle
+  document.getElementById("legend-toggle").addEventListener("click", function () {
+    var legend = document.getElementById("legend");
+    var isMinimized = legend.classList.toggle("minimized");
+    this.textContent = isMinimized ? "▸ legend" : "▾ legend";
   });
 
 })();

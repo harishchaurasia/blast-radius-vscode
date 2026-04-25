@@ -6,23 +6,23 @@ var MOCK_GRAPH_DATA = {
 
   nodes: [
     // ── Auth module ──
-    { id: "src/auth/login.ts#handleLogin",       filePath: "src/auth/login.ts",       symbolName: "handleLogin",       startLine: 5,  endLine: 20, kind: "function" },
+    { id: "src/auth/login.ts#handleLogin",       filePath: "src/auth/login.ts",       symbolName: "handleLogin",       startLine: 5,  endLine: 20, kind: "function", exported: true },
     { id: "src/auth/login.ts#validateCredentials",filePath: "src/auth/login.ts",       symbolName: "validateCredentials",startLine: 22, endLine: 35, kind: "function" },
-    { id: "src/auth/session.ts#createSession",    filePath: "src/auth/session.ts",     symbolName: "createSession",     startLine: 3,  endLine: 18, kind: "function" },
-    { id: "src/auth/session.ts#refreshSession",   filePath: "src/auth/session.ts",     symbolName: "refreshSession",    startLine: 20, endLine: 40, kind: "function" },
-    { id: "src/auth/token.ts#generateToken",      filePath: "src/auth/token.ts",       symbolName: "generateToken",     startLine: 1,  endLine: 12, kind: "arrow" },
-    { id: "src/auth/token.ts#verifyToken",        filePath: "src/auth/token.ts",       symbolName: "verifyToken",       startLine: 14, endLine: 28, kind: "arrow" },
+    { id: "src/auth/session.ts#createSession",    filePath: "src/auth/session.ts",     symbolName: "createSession",     startLine: 3,  endLine: 18, kind: "function", exported: true },
+    { id: "src/auth/session.ts#refreshSession",   filePath: "src/auth/session.ts",     symbolName: "refreshSession",    startLine: 20, endLine: 40, kind: "function", exported: true },
+    { id: "src/auth/token.ts#generateToken",      filePath: "src/auth/token.ts",       symbolName: "generateToken",     startLine: 1,  endLine: 12, kind: "arrow", exported: true },
+    { id: "src/auth/token.ts#verifyToken",        filePath: "src/auth/token.ts",       symbolName: "verifyToken",       startLine: 14, endLine: 28, kind: "arrow", exported: true },
 
     // ── API module ──
-    { id: "src/api/client.ts#fetchUser",          filePath: "src/api/client.ts",       symbolName: "fetchUser",         startLine: 10, endLine: 25, kind: "function" },
-    { id: "src/api/client.ts#fetchOrders",        filePath: "src/api/client.ts",       symbolName: "fetchOrders",       startLine: 27, endLine: 45, kind: "function" },
-    { id: "src/api/client.ts#postOrder",          filePath: "src/api/client.ts",       symbolName: "postOrder",         startLine: 47, endLine: 60, kind: "function" },
-    { id: "src/api/middleware.ts#withAuth",        filePath: "src/api/middleware.ts",   symbolName: "withAuth",          startLine: 1,  endLine: 15, kind: "arrow" },
+    { id: "src/api/client.ts#fetchUser",          filePath: "src/api/client.ts",       symbolName: "fetchUser",         startLine: 10, endLine: 25, kind: "function", exported: true },
+    { id: "src/api/client.ts#fetchOrders",        filePath: "src/api/client.ts",       symbolName: "fetchOrders",       startLine: 27, endLine: 45, kind: "function", exported: true },
+    { id: "src/api/client.ts#postOrder",          filePath: "src/api/client.ts",       symbolName: "postOrder",         startLine: 47, endLine: 60, kind: "function", exported: true },
+    { id: "src/api/middleware.ts#withAuth",        filePath: "src/api/middleware.ts",   symbolName: "withAuth",          startLine: 1,  endLine: 15, kind: "arrow", exported: true },
 
     // ── Store module ──
-    { id: "src/store/userStore.ts#setUser",       filePath: "src/store/userStore.ts",  symbolName: "setUser",           startLine: 5,  endLine: 12, kind: "function" },
-    { id: "src/store/userStore.ts#getUser",       filePath: "src/store/userStore.ts",  symbolName: "getUser",           startLine: 14, endLine: 20, kind: "function" },
-    { id: "src/store/cartStore.ts#addToCart",     filePath: "src/store/cartStore.ts",  symbolName: "addToCart",         startLine: 3,  endLine: 18, kind: "function" },
+    { id: "src/store/userStore.ts#setUser",       filePath: "src/store/userStore.ts",  symbolName: "setUser",           startLine: 5,  endLine: 12, kind: "function", exported: true },
+    { id: "src/store/userStore.ts#getUser",       filePath: "src/store/userStore.ts",  symbolName: "getUser",           startLine: 14, endLine: 20, kind: "function", exported: true },
+    { id: "src/store/cartStore.ts#addToCart",     filePath: "src/store/cartStore.ts",  symbolName: "addToCart",         startLine: 3,  endLine: 18, kind: "function", exported: true },
     { id: "src/store/cartStore.ts#calculateTotal",filePath: "src/store/cartStore.ts",  symbolName: "calculateTotal",    startLine: 20, endLine: 35, kind: "function" },
 
     // ── Components module ──
@@ -32,7 +32,7 @@ var MOCK_GRAPH_DATA = {
     { id: "src/components/CartView.ts#checkout",        filePath: "src/components/CartView.ts",   symbolName: "checkout",       startLine: 10, endLine: 35, kind: "method" },
 
     // ── Utils ──
-    { id: "src/utils/logger.ts#log",              filePath: "src/utils/logger.ts",     symbolName: "log",               startLine: 1,  endLine: 8,  kind: "arrow" },
+    { id: "src/utils/logger.ts#log",              filePath: "src/utils/logger.ts",     symbolName: "log",               startLine: 1,  endLine: 8,  kind: "arrow", exported: true },
     { id: "src/utils/format.ts#formatCurrency",   filePath: "src/utils/format.ts",     symbolName: "formatCurrency",    startLine: 1,  endLine: 10, kind: "arrow" },
   ],
 
