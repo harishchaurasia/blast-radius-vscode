@@ -4,7 +4,7 @@
   "description": "Visualize the blast radius of any code change",
   "version": "0.0.1",
   "engines": {
-    "vscode": "^1.116.0"
+    "vscode": "^1.107.0"
   },
   "categories": [
     "Other"
@@ -31,7 +31,7 @@
     "@types/cytoscape": "^3.21.9",
     "@types/mocha": "^10.0.10",
     "@types/node": "22.x",
-    "@types/vscode": "^1.116.0",
+    "@types/vscode": "^1.107.0",
     "@vscode/test-cli": "^0.0.12",
     "@vscode/test-electron": "^2.5.2",
     "eslint": "^9.39.3",
