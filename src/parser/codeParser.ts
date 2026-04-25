@@ -1,148 +1,373 @@
+/**
+ * Code Parser — walks the TypeScript AST to extract function definitions and call sites.
+ *
+ * Uses the TypeScript Compiler API (`ts.createProgram`) to parse all `.ts` files
+ * under the workspace `src/` directory. Extracts:
+ *   - Named function declarations (`FunctionDeclaration`)
+ *   - Arrow functions assigned to `const`/`let` (`VariableDeclaration` with `ArrowFunction`)
+ *   - Class methods (`MethodDeclaration`)
+ *   - Exported functions (all of the above with `export` modifier)
+ *
+ * Call edges are resolved via `TypeChecker.getSymbolAtLocation` on `CallExpression` nodes.
+ *
+ * **Known limitations (skipped dynamic calls):**
+ *   - String-keyed property access (e.g. `obj["method"]()`)
+ *   - `eval()` invocations
+ *   - Framework-injected callbacks (e.g. decorators, DI containers)
+ *   - Dynamically computed call targets
+ */
+
 import * as ts from "typescript";
 import * as path from "path";
-import * as fs from "fs";
 import { FunctionNode, CallEdge, ParseResult } from "../types";
 
-export function parseProject(workspaceRoot: string): ParseResult {
-  const nodes: FunctionNode[] = [];
-  const edges: CallEdge[] = [];
-  const srcPath = path.join(workspaceRoot, "src");
-  
-  if (!fs.existsSync(srcPath)) {
-    return { nodes, edges };
-  }
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
-  const tsConfigPath = path.join(workspaceRoot, "tsconfig.json");
-  const configFile = ts.readConfigFile(tsConfigPath, ts.sys.readFile);
-  const parsedConfig = ts.parseJsonConfigFileContent(
-    configFile.config,
-    ts.sys,
-    workspaceRoot
-  );
-
-  const program = ts.createProgram({
-    rootNames: parsedConfig.fileNames.filter(f => f.includes("/src/") && f.endsWith(".ts")),
-    options: parsedConfig.options,
-  });
-
-  const checker = program.getTypeChecker();
-
-  for (const sourceFile of program.getSourceFiles()) {
-    if (!sourceFile.fileName.includes("/src/") || sourceFile.isDeclarationFile) {
-      continue;
-    }
-
-    const relativePath = path.relative(workspaceRoot, sourceFile.fileName);
-    visitNode(sourceFile, relativePath, nodes, edges, checker, workspaceRoot);
-  }
-
-  return { nodes, edges };
+/**
+ * Build a node ID from a relative file path and symbol name.
+ * Format: `{relativePath}#{symbolName}`
+ */
+function makeNodeId(relativePath: string, symbolName: string): string {
+  return `${relativePath}#${symbolName}`;
 }
 
-function visitNode(
-  node: ts.Node,
-  filePath: string,
-  nodes: FunctionNode[],
-  edges: CallEdge[],
-  checker: ts.TypeChecker,
-  workspaceRoot: string,
-  currentFunctionId?: string
-): void {
-  if (ts.isFunctionDeclaration(node) && node.name) {
-    const functionNode = createFunctionNode(node, filePath, node.name.text, "function");
-    nodes.push(functionNode);
-    ts.forEachChild(node, child => visitNode(child, filePath, nodes, edges, checker, workspaceRoot, functionNode.id));
-  } else if (ts.isVariableStatement(node)) {
-    for (const declaration of node.declarationList.declarations) {
-      if (ts.isVariableDeclaration(declaration) && declaration.initializer) {
-        if (ts.isArrowFunction(declaration.initializer) && ts.isIdentifier(declaration.name)) {
-          const functionNode = createFunctionNode(declaration.initializer, filePath, declaration.name.text, "arrow");
-          nodes.push(functionNode);
-          ts.forEachChild(declaration.initializer, child => visitNode(child, filePath, nodes, edges, checker, workspaceRoot, functionNode.id));
+/**
+ * Return the name of the enclosing class, or `undefined` if the node is not
+ * inside a class declaration.
+ */
+function getEnclosingClassName(node: ts.Node): string | undefined {
+  let current = node.parent;
+  while (current) {
+    if (ts.isClassDeclaration(current) && current.name) {
+      return current.name.text;
+    }
+    current = current.parent;
+  }
+  return undefined;
+}
+
+/**
+ * Check whether a call expression is a dynamic call that should be skipped.
+ *
+ * Skipped patterns:
+ *   - `eval(...)` calls
+ *   - String-keyed element access: `obj["method"]()`
+ *   - Computed property access where the property is not an identifier
+ */
+function isDynamicCall(node: ts.CallExpression): boolean {
+  const expr = node.expression;
+
+  // eval()
+  if (ts.isIdentifier(expr) && expr.text === "eval") {
+    return true;
+  }
+
+  // obj["method"]() — element access with string literal
+  if (ts.isElementAccessExpression(expr)) {
+    return true;
+  }
+
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// AST Walking
+// ---------------------------------------------------------------------------
+
+/**
+ * Collect all FunctionNode entries from a single source file.
+ */
+function collectNodes(
+  sourceFile: ts.SourceFile,
+  relativePath: string,
+): FunctionNode[] {
+  const nodes: FunctionNode[] = [];
+
+  function visit(node: ts.Node): void {
+    // Named function declarations: `function foo() {}` or `export function foo() {}`
+    if (ts.isFunctionDeclaration(node) && node.name) {
+      const symbolName = node.name.text;
+      const start = sourceFile.getLineAndCharacterOfPosition(node.getStart());
+      const end = sourceFile.getLineAndCharacterOfPosition(node.getEnd());
+      nodes.push({
+        id: makeNodeId(relativePath, symbolName),
+        filePath: relativePath,
+        symbolName,
+        startLine: start.line + 1,
+        endLine: end.line + 1,
+        kind: "function",
+      });
+    }
+
+    // Arrow functions assigned to const/let:
+    // `const foo = () => {}` or `export const foo = () => {}`
+    if (ts.isVariableStatement(node)) {
+      for (const decl of node.declarationList.declarations) {
+        if (
+          decl.name &&
+          ts.isIdentifier(decl.name) &&
+          decl.initializer &&
+          ts.isArrowFunction(decl.initializer)
+        ) {
+          const symbolName = decl.name.text;
+          const start = sourceFile.getLineAndCharacterOfPosition(node.getStart());
+          const end = sourceFile.getLineAndCharacterOfPosition(node.getEnd());
+          nodes.push({
+            id: makeNodeId(relativePath, symbolName),
+            filePath: relativePath,
+            symbolName,
+            startLine: start.line + 1,
+            endLine: end.line + 1,
+            kind: "arrow",
+          });
         }
       }
     }
-  } else if (ts.isMethodDeclaration(node) && ts.isIdentifier(node.name)) {
-    const className = getClassName(node);
-    const methodName = className ? `${className}.${node.name.text}` : node.name.text;
-    const functionNode = createFunctionNode(node, filePath, methodName, "method");
-    nodes.push(functionNode);
-    ts.forEachChild(node, child => visitNode(child, filePath, nodes, edges, checker, workspaceRoot, functionNode.id));
-  } else if (ts.isCallExpression(node) && currentFunctionId) {
-    const calleeId = resolveCallExpression(node, checker, workspaceRoot);
-    if (calleeId) {
-      edges.push({ callerId: currentFunctionId, calleeId });
+
+    // Class methods: `class Foo { bar() {} }`
+    if (ts.isMethodDeclaration(node) && node.name && ts.isIdentifier(node.name)) {
+      const className = getEnclosingClassName(node);
+      if (className) {
+        const symbolName = `${className}.${node.name.text}`;
+        const start = sourceFile.getLineAndCharacterOfPosition(node.getStart());
+        const end = sourceFile.getLineAndCharacterOfPosition(node.getEnd());
+        nodes.push({
+          id: makeNodeId(relativePath, symbolName),
+          filePath: relativePath,
+          symbolName,
+          startLine: start.line + 1,
+          endLine: end.line + 1,
+          kind: "method",
+        });
+      }
     }
-    ts.forEachChild(node, child => visitNode(child, filePath, nodes, edges, checker, workspaceRoot, currentFunctionId));
-  } else {
-    ts.forEachChild(node, child => visitNode(child, filePath, nodes, edges, checker, workspaceRoot, currentFunctionId));
+
+    ts.forEachChild(node, visit);
   }
+
+  visit(sourceFile);
+  return nodes;
 }
 
-function createFunctionNode(
-  node: ts.FunctionDeclaration | ts.ArrowFunction | ts.MethodDeclaration,
-  filePath: string,
-  symbolName: string,
-  kind: "function" | "arrow" | "method"
-): FunctionNode {
-  const sourceFile = node.getSourceFile();
-  const start = sourceFile.getLineAndCharacterOfPosition(node.getStart());
-  const end = sourceFile.getLineAndCharacterOfPosition(node.getEnd());
-  
-  return {
-    id: `${filePath}#${symbolName}`,
-    filePath,
-    symbolName,
-    startLine: start.line + 1,
-    endLine: end.line + 1,
-    kind,
-  };
-}
-
-function getClassName(node: ts.Node): string | undefined {
-  let parent = node.parent;
-  while (parent) {
-    if (ts.isClassDeclaration(parent) && parent.name) {
-      return parent.name.text;
-    }
-    parent = parent.parent;
-  }
-  return undefined;
-}
-
-function resolveCallExpression(
-  node: ts.CallExpression,
+/**
+ * Resolve a CallExpression to the FunctionNode ID of the callee, if possible.
+ * Returns `undefined` when the call target cannot be statically resolved.
+ */
+function resolveCallTarget(
+  callExpr: ts.CallExpression,
   checker: ts.TypeChecker,
-  workspaceRoot: string
+  workspaceRoot: string,
+  sourceFiles: ReadonlyArray<ts.SourceFile>,
 ): string | undefined {
-  if (ts.isPropertyAccessExpression(node.expression)) {
+  const expr = callExpr.expression;
+
+  // Try to get the symbol at the call site
+  let symbol = checker.getSymbolAtLocation(expr);
+  if (!symbol) {
     return undefined;
   }
 
-  if (ts.isIdentifier(node.expression)) {
-    const symbol = checker.getSymbolAtLocation(node.expression);
-    if (!symbol || !symbol.declarations || symbol.declarations.length === 0) {
-      return undefined;
-    }
+  // Follow aliases (e.g. imports)
+  if (symbol.flags & ts.SymbolFlags.Alias) {
+    symbol = checker.getAliasedSymbol(symbol);
+  }
 
-    const declaration = symbol.declarations[0];
-    const sourceFile = declaration.getSourceFile();
-    
-    if (sourceFile.isDeclarationFile || !sourceFile.fileName.includes("/src/")) {
-      return undefined;
-    }
+  const declarations = symbol.getDeclarations();
+  if (!declarations || declarations.length === 0) {
+    return undefined;
+  }
 
-    const relativePath = path.relative(workspaceRoot, sourceFile.fileName);
-    const symbolName = symbol.getName();
-    
-    if (ts.isFunctionDeclaration(declaration) || ts.isVariableDeclaration(declaration)) {
-      return `${relativePath}#${symbolName}`;
-    } else if (ts.isMethodDeclaration(declaration)) {
-      const className = getClassName(declaration);
-      const methodName = className ? `${className}.${symbolName}` : symbolName;
-      return `${relativePath}#${methodName}`;
+  const decl = declarations[0];
+  const declSourceFile = decl.getSourceFile();
+
+  // Only resolve to files within the workspace
+  const declFilePath = path.relative(workspaceRoot, declSourceFile.fileName);
+  if (declFilePath.startsWith("..") || path.isAbsolute(declFilePath)) {
+    return undefined;
+  }
+
+  // Normalize to forward slashes
+  const normalizedPath = declFilePath.split(path.sep).join("/");
+
+  // Determine the symbol name based on the declaration kind
+  let symbolName: string | undefined;
+
+  if (ts.isFunctionDeclaration(decl) && decl.name) {
+    symbolName = decl.name.text;
+  } else if (ts.isMethodDeclaration(decl) && decl.name && ts.isIdentifier(decl.name)) {
+    const className = getEnclosingClassName(decl);
+    if (className) {
+      symbolName = `${className}.${decl.name.text}`;
+    }
+  } else if (ts.isVariableDeclaration(decl) && ts.isIdentifier(decl.name)) {
+    // Arrow function assigned to a variable
+    if (decl.initializer && ts.isArrowFunction(decl.initializer)) {
+      symbolName = decl.name.text;
     }
   }
 
+  if (!symbolName) {
+    return undefined;
+  }
+
+  return makeNodeId(normalizedPath, symbolName);
+}
+
+/**
+ * Find the enclosing FunctionNode ID for a given AST node.
+ * Walks up the parent chain to find the nearest function/method/arrow declaration.
+ */
+function findEnclosingFunctionId(
+  node: ts.Node,
+  relativePath: string,
+): string | undefined {
+  let current = node.parent;
+  while (current) {
+    // Named function declaration
+    if (ts.isFunctionDeclaration(current) && current.name) {
+      return makeNodeId(relativePath, current.name.text);
+    }
+
+    // Method declaration
+    if (
+      ts.isMethodDeclaration(current) &&
+      current.name &&
+      ts.isIdentifier(current.name)
+    ) {
+      const className = getEnclosingClassName(current);
+      if (className) {
+        return makeNodeId(relativePath, `${className}.${current.name.text}`);
+      }
+    }
+
+    // Arrow function assigned to a variable
+    if (ts.isArrowFunction(current)) {
+      const parent = current.parent;
+      if (
+        ts.isVariableDeclaration(parent) &&
+        ts.isIdentifier(parent.name)
+      ) {
+        return makeNodeId(relativePath, parent.name.text);
+      }
+    }
+
+    current = current.parent;
+  }
   return undefined;
+}
+
+/**
+ * Collect all CallEdge entries from a single source file.
+ */
+function collectEdges(
+  sourceFile: ts.SourceFile,
+  relativePath: string,
+  checker: ts.TypeChecker,
+  workspaceRoot: string,
+  sourceFiles: ReadonlyArray<ts.SourceFile>,
+): CallEdge[] {
+  const edges: CallEdge[] = [];
+
+  function visit(node: ts.Node): void {
+    if (ts.isCallExpression(node)) {
+      // Skip dynamic calls
+      if (!isDynamicCall(node)) {
+        const callerId = findEnclosingFunctionId(node, relativePath);
+        if (callerId) {
+          const calleeId = resolveCallTarget(node, checker, workspaceRoot, sourceFiles);
+          if (calleeId) {
+            edges.push({ callerId, calleeId });
+          }
+        }
+      }
+    }
+
+    ts.forEachChild(node, visit);
+  }
+
+  visit(sourceFile);
+  return edges;
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse all `.ts` files under the given workspace root's `src/` directory.
+ *
+ * Uses `ts.createProgram` with the workspace `tsconfig.json` to load files
+ * with full type information. Walks each source file's AST to extract
+ * `FunctionNode` entries and `CallEdge` entries.
+ *
+ * @param workspaceRoot - Absolute path to the workspace root directory
+ * @returns ParseResult containing all discovered nodes and edges
+ */
+export function parseProject(workspaceRoot: string): ParseResult {
+  const tsconfigPath = path.join(workspaceRoot, "tsconfig.json");
+
+  // Read tsconfig.json
+  const configFile = ts.readConfigFile(tsconfigPath, ts.sys.readFile);
+  if (configFile.error) {
+    return { nodes: [], edges: [] };
+  }
+
+  const parsedConfig = ts.parseJsonConfigFileContent(
+    configFile.config,
+    ts.sys,
+    workspaceRoot,
+  );
+
+  // Filter to only .ts files under src/
+  const srcDir = path.join(workspaceRoot, "src");
+  const srcFiles = parsedConfig.fileNames.filter((f) => {
+    const normalized = path.resolve(f);
+    return normalized.startsWith(srcDir) && normalized.endsWith(".ts");
+  });
+
+  if (srcFiles.length === 0) {
+    return { nodes: [], edges: [] };
+  }
+
+  // Create the program with full type checking
+  const program = ts.createProgram(srcFiles, parsedConfig.options);
+  const checker = program.getTypeChecker();
+  const allSourceFiles = program.getSourceFiles().filter(
+    (sf) => !sf.isDeclarationFile,
+  );
+
+  const allNodes: FunctionNode[] = [];
+  const allEdges: CallEdge[] = [];
+
+  for (const sourceFile of allSourceFiles) {
+    const filePath = path.resolve(sourceFile.fileName);
+
+    // Only process files under src/
+    if (!filePath.startsWith(srcDir)) {
+      continue;
+    }
+
+    const relativePath = path
+      .relative(workspaceRoot, filePath)
+      .split(path.sep)
+      .join("/");
+
+    // Collect function nodes
+    const nodes = collectNodes(sourceFile, relativePath);
+    allNodes.push(...nodes);
+
+    // Collect call edges
+    const edges = collectEdges(
+      sourceFile,
+      relativePath,
+      checker,
+      workspaceRoot,
+      allSourceFiles,
+    );
+    allEdges.push(...edges);
+  }
+
+  return { nodes: allNodes, edges: allEdges };
 }

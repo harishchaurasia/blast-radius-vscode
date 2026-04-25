@@ -10,12 +10,14 @@
   var cy;
   var allData = null;
   var selectedNodeId = null;
+  var searchIndex = null;
 
   // In VS Code, data arrives via postMessage. In dev mode, we load mock data on init.
   window.addEventListener("message", function (event) {
     var message = event.data;
     if (message.type === "graph-data") {
       allData = message;
+      searchIndex = SearchEngine.buildSearchIndex(message);
       initializeGraph(message);
       updateEmptyState();
     } else if (message.type === "highlight") {
@@ -28,6 +30,7 @@
     window.addEventListener("DOMContentLoaded", function () {
       if (typeof MOCK_GRAPH_DATA !== "undefined") {
         allData = MOCK_GRAPH_DATA;
+        searchIndex = SearchEngine.buildSearchIndex(MOCK_GRAPH_DATA);
         initializeGraph(MOCK_GRAPH_DATA);
         updateEmptyState();
       }
@@ -105,11 +108,11 @@
     cy.on("tap", "node", (event) => {
       const node = event.target;
       const nodeType = node.data("type");
-      // Ignore clicks on file box parents
-      if (nodeType === "file") { return; }
+      if (nodeType !== "function") { return; }
       const nodeId = node.id();
       selectedNodeId = nodeId;
-      vscodeApi.postMessage({ type: "node-click", nodeId: nodeId });    });
+      vscodeApi.postMessage({ type: "node-click", nodeId: nodeId });
+    });
 
     cy.on("tap", (event) => {
       if (event.target === cy) {
@@ -117,8 +120,24 @@
       }
     });
 
+    // Show label on hover for function and test nodes
+    cy.on("mouseover", "node[type='function'], node[type='test']", function (event) {
+      var node = event.target;
+      if (!node.data("impactLevel") || node.data("impactLevel") === "none" || node.data("impactLevel") === "dimmed") {
+        node.style("label", node.data("label"));
+      }
+    });
+    cy.on("mouseout", "node[type='function'], node[type='test']", function (event) {
+      var node = event.target;
+      var impact = node.data("impactLevel");
+      if (!impact || impact === "none" || impact === "dimmed") {
+        node.style("label", "");
+      }
+    });
+
     runLayout();
     buildModuleLegend();
+    populateStatsBar(data);
   }
   // ── Module color palette ──
   // Distinct, readable colors for up to 10 modules. Wraps around if more.
@@ -159,30 +178,7 @@
       moduleColorIndex[moduleList[m]] = m % MODULE_COLORS.length;
     }
 
-    // Create parent (file box) nodes — one per unique filePath
-    var seenFiles = {};
-    for (var i = 0; i < data.nodes.length; i++) {
-      var fp = data.nodes[i].filePath;
-      if (!seenFiles[fp]) {
-        seenFiles[fp] = true;
-        var mod = getModuleFromPath(fp);
-        var colorIdx = moduleColorIndex[mod] || 0;
-        var fileName = fp.split("/").pop();
-        elements.push({
-          data: {
-            id: "file::" + fp,
-            label: fileName,
-            filePath: fp,
-            type: "file",
-            module: mod,
-            moduleColorBg: MODULE_COLORS[colorIdx].bg,
-            moduleColorBorder: MODULE_COLORS[colorIdx].border,
-          },
-        });
-      }
-    }
-
-    // Create test file nodes — no parent box, they float freely
+    // Test file nodes
     for (var t = 0; t < data.testFiles.length; t++) {
       var testFile = data.testFiles[t];
       var tmod2 = getModuleFromPath(testFile.path);
@@ -221,20 +217,19 @@
       }
     }
 
-    // Create function child nodes — parented to their file box
+    // Function nodes
     for (var j = 0; j < data.nodes.length; j++) {
       var node = data.nodes[j];
       var mod2 = getModuleFromPath(node.filePath);
       var colorIdx2 = moduleColorIndex[mod2] || 0;
       var conns = connectionCount[node.id] || 0;
-      // Scale: min 18, max 56, based on connection count
-      var nodeSize = Math.min(56, Math.max(18, 18 + conns * 7));
+      var nodeSize = Math.min(48, Math.max(16, 16 + conns * 5));
       elements.push({
         data: {
           id: node.id,
           label: node.symbolName,
+          fileName: node.filePath.split("/").pop(),
           filePath: node.filePath,
-          parent: "file::" + node.filePath,
           type: "function",
           kind: node.kind || "function",
           exported: node.exported || false,
@@ -247,9 +242,9 @@
       });
     }
 
-    // Edges between function nodes
-    for (var e = 0; e < data.edges.length; e++) {
-      var edge = data.edges[e];
+    // Call edges (hidden by default)
+    for (var e2 = 0; e2 < data.edges.length; e2++) {
+      var edge = data.edges[e2];
       elements.push({
         data: {
           id: "e-" + edge.callerId + "--" + edge.calleeId,
@@ -259,9 +254,24 @@
       });
     }
 
-    // Store module list for legend
     window.__blastModules = moduleList;
     window.__blastModuleColors = moduleColorIndex;
+
+    // Module label nodes — non-interactive, placed at cluster centers
+    for (var ml = 0; ml < moduleList.length; ml++) {
+      var mlMod = moduleList[ml];
+      var mlColorIdx = moduleColorIndex[mlMod] || 0;
+      elements.push({
+        data: {
+          id: "modlabel::" + mlMod,
+          label: mlMod + "/",
+          type: "module-label",
+          module: mlMod,
+          moduleColorBg: MODULE_COLORS[mlColorIdx].bg,
+          moduleColorBorder: MODULE_COLORS[mlColorIdx].border,
+        },
+      });
+    }
 
     return elements;
   }
@@ -269,127 +279,135 @@
   function runLayout() {
     if (!cy) { return; }
 
-    var orphans = cy.nodes(":orphan");
-    var count = orphans.length;
-    if (count === 0) { return; }
-
-    // Group orphan nodes by module
+    // Group nodes by module
     var moduleGroups = {};
-    orphans.forEach(function (node) {
-      var mod = node.data("module") || "other";
+    cy.nodes().forEach(function (n) {
+      var mod = n.data("module") || "other";
       if (!moduleGroups[mod]) { moduleGroups[mod] = []; }
-      moduleGroups[mod].push(node);
+      moduleGroups[mod].push(n);
     });
 
     var moduleNames = Object.keys(moduleGroups).sort();
-    var numModules = moduleNames.length;
+    var cols = Math.ceil(Math.sqrt(moduleNames.length));
 
-    // Calculate zone sizes based on file count per module
-    var baseZoneW = 250;
-    var baseZoneH = 200;
-    var perFileW = 110;
-    var perFileH = 90;
-    var zonePadding = 40;
-
-    // First pass: compute zone sizes and total layout dimensions
-    // Seeded random for consistent layout
-    var seed = 0;
-    orphans.forEach(function(n) {
-      for (var c = 0; c < n.id().length; c++) { seed += n.id().charCodeAt(c); }
-    });
-    function rand() { seed = (seed * 1664525 + 1013904223) & 0xffffffff; return Math.abs(seed) / 0x7fffffff; }
-
-    var zoneInfo = [];
+    // Calculate cluster sizes based on node count
+    var clusterPositions = [];
     for (var mi = 0; mi < moduleNames.length; mi++) {
-      var mod = moduleNames[mi];
-      var group = moduleGroups[mod];
-      var fileCols = Math.ceil(Math.sqrt(group.length));
-      var fileRows = Math.ceil(group.length / fileCols);
-      var w = baseZoneW + fileCols * perFileW;
-      var h = baseZoneH + fileRows * perFileH;
-      zoneInfo.push({ mod: mod, group: group, w: w, h: h, fileCols: fileCols });
-    }
-
-    // Arrange zones in rows, wrapping when too wide
-    var maxRowW = 1200;
-    var zoneGap = 30;
-    var rows = [[]];
-    var rowWidths = [0];
-    for (var zi = 0; zi < zoneInfo.length; zi++) {
-      var z = zoneInfo[zi];
-      var currentRow = rows.length - 1;
-      if (rowWidths[currentRow] + z.w + zoneGap > maxRowW && rows[currentRow].length > 0) {
-        rows.push([]);
-        rowWidths.push(0);
-        currentRow++;
+      var group = moduleGroups[moduleNames[mi]];
+      var nodeSpacingCalc = 70;
+      var rings = 0;
+      var remaining = group.length - 1; // minus center node
+      while (remaining > 0) {
+        rings++;
+        var ringCirc = 2 * Math.PI * rings * nodeSpacingCalc;
+        remaining -= Math.floor(ringCirc / nodeSpacingCalc);
       }
-      rows[currentRow].push(zi);
-      rowWidths[currentRow] += z.w + zoneGap;
+      var radius = Math.max(30, rings * nodeSpacingCalc + 20);
+      clusterPositions.push({ mod: moduleNames[mi], group: group, radius: radius });
     }
 
-    // Position zones
-    var yOffset = 0;
-    for (var ri = 0; ri < rows.length; ri++) {
-      var rowMaxH = 0;
-      var xOffset = 0;
-      for (var rj = 0; rj < rows[ri].length; rj++) {
-        var zIdx = rows[ri][rj];
-        var zone = zoneInfo[zIdx];
-        var group = zone.group;
-        var zoneCx = xOffset + zone.w / 2;
-        var zoneCy = yOffset + zone.h / 2;
-
-        // Place files within this zone
-        var fileCols = zone.fileCols;
-        var fileSpacingX = (zone.w - zonePadding * 2) / Math.max(fileCols, 1);
-        var fileSpacingY = (zone.h - zonePadding * 2) / Math.max(Math.ceil(group.length / fileCols), 1);
-
-        for (var fi = 0; fi < group.length; fi++) {
-          var fc = fi % fileCols;
-          var fr = Math.floor(fi / fileCols);
-          var jitterX = (rand() - 0.5) * Math.min(fileSpacingX * 0.2, 30);
-          var jitterY = (rand() - 0.5) * Math.min(fileSpacingY * 0.2, 25);
-          var x = zoneCx - (zone.w - zonePadding * 2) / 2 + fc * fileSpacingX + fileSpacingX / 2 + jitterX;
-          var y = zoneCy - (zone.h - zonePadding * 2) / 2 + fr * fileSpacingY + fileSpacingY / 2 + jitterY;
-          group[fi].position({ x: x, y: y });
+    // Place clusters on a grid with generous spacing
+    var clusterGap = 100;
+    var col, row, cx, cy2;
+    var maxRadiusInRow = [];
+    for (var ri = 0; ri < Math.ceil(moduleNames.length / cols); ri++) {
+      var maxR = 0;
+      for (var ci = 0; ci < cols; ci++) {
+        var idx = ri * cols + ci;
+        if (idx < clusterPositions.length && clusterPositions[idx].radius > maxR) {
+          maxR = clusterPositions[idx].radius;
         }
-
-        xOffset += zone.w + zoneGap;
-        if (zone.h > rowMaxH) { rowMaxH = zone.h; }
       }
-      yOffset += rowMaxH + zoneGap;
+      maxRadiusInRow.push(maxR);
     }
 
-    // Position children inside each file box
-    cy.nodes("[type='file']").forEach(function (fileNode) {
-      var children = fileNode.children();
-      var childCount = children.length;
-      if (childCount === 0) { return; }
+    var yOffset = 0;
+    for (var mi2 = 0; mi2 < clusterPositions.length; mi2++) {
+      col = mi2 % cols;
+      row = Math.floor(mi2 / cols);
 
-      var pos = fileNode.position();
-      var childCols = Math.ceil(Math.sqrt(childCount));
+      // Calculate x position based on max radius in each column
+      var xOffset = 0;
+      for (var prevCol = 0; prevCol < col; prevCol++) {
+        // Find max radius in this column
+        var colMaxR = 0;
+        for (var r = 0; r < Math.ceil(moduleNames.length / cols); r++) {
+          var cIdx = r * cols + prevCol;
+          if (cIdx < clusterPositions.length && clusterPositions[cIdx].radius > colMaxR) {
+            colMaxR = clusterPositions[cIdx].radius;
+          }
+        }
+        xOffset += colMaxR * 2 + clusterGap;
+      }
 
-      var maxSize = 26;
-      children.forEach(function (child) {
-        var s = child.data("nodeSize") || 26;
-        if (s > maxSize) { maxSize = s; }
-      });
-      var spacingX = maxSize + 20;
-      var spacingY = maxSize + 16;
-      var totalW = (childCols - 1) * spacingX;
-      var totalH = (Math.ceil(childCount / childCols) - 1) * spacingY;
+      if (col === 0) {
+        if (row > 0) {
+          yOffset += maxRadiusInRow[row - 1] + clusterGap;
+        }
+      }
 
-      children.forEach(function (child, ci) {
-        var cc = ci % childCols;
-        var cr = Math.floor(ci / childCols);
-        child.position({
-          x: pos.x - totalW / 2 + cc * spacingX,
-          y: pos.y - totalH / 2 + cr * spacingY + 8,
-        });
-      });
+      var cluster = clusterPositions[mi2];
+      cx = xOffset + cluster.radius;
+      cy2 = yOffset + maxRadiusInRow[row];
+
+      // Arrange nodes in a packed circular cluster (concentric rings)
+      var group = cluster.group;
+      var nodeSpacing = 70;
+      var placed = 0;
+      var ring = 0;
+
+      // Center node
+      if (placed < group.length) {
+        group[placed].position({ x: cx, y: cy2 });
+        placed++;
+      }
+
+      // Concentric rings outward
+      while (placed < group.length) {
+        ring++;
+        var ringRadius = ring * nodeSpacing;
+        var circumference = 2 * Math.PI * ringRadius;
+        var nodesInRing = Math.min(
+          Math.floor(circumference / nodeSpacing),
+          group.length - placed
+        );
+        nodesInRing = Math.max(nodesInRing, 1);
+
+        for (var ri2 = 0; ri2 < nodesInRing && placed < group.length; ri2++) {
+          var angle = (2 * Math.PI * ri2) / nodesInRing - Math.PI / 2;
+          group[placed].position({
+            x: cx + ringRadius * Math.cos(angle),
+            y: cy2 + ringRadius * Math.sin(angle),
+          });
+          placed++;
+        }
+      }
+    }
+
+    cy.fit(undefined, 50);
+
+    // Position module labels at cluster centers
+    for (var ml = 0; ml < clusterPositions.length; ml++) {
+      var labelNode = cy.getElementById("modlabel::" + clusterPositions[ml].mod);
+      if (labelNode && labelNode.length > 0) {
+        // Find the center of this cluster's nodes
+        var clGroup = clusterPositions[ml].group;
+        var sumX = 0, sumY = 0;
+        for (var gi = 0; gi < clGroup.length; gi++) {
+          var gp = clGroup[gi].position();
+          sumX += gp.x;
+          sumY += gp.y;
+        }
+        labelNode.position({ x: sumX / clGroup.length, y: sumY / clGroup.length });
+      }
+    }
+
+    // Save positions for reset animation
+    window.__savedPositions = {};
+    cy.nodes().forEach(function (n) {
+      var pos = n.position();
+      window.__savedPositions[n.id()] = { x: pos.x, y: pos.y };
     });
-
-    cy.fit(undefined, 60);
   }
 
   function buildStylesheet() {
@@ -397,56 +415,39 @@
     var outlineColor = getOutlineColor();
 
     return [
-      // ── File box (parent/compound node) ──
+      // ── Module label nodes (cluster centers) ──
       {
-        selector: "node[type='file']",
+        selector: "node[type='module-label']",
         style: {
           "background-color": "data(moduleColorBg)",
           "background-opacity": 0.12,
-          "border-color": "data(moduleColorBorder)",
-          "border-width": 2,
-          "border-opacity": 0.7,
+          "border-width": 0,
           label: "data(label)",
-          "text-valign": "top",
+          "text-valign": "center",
           "text-halign": "center",
-          "font-size": "11px",
-          "font-weight": "600",
-          color: textColor,
-          "text-outline-width": 0,
-          "text-margin-y": -6,
-          "padding": "14px",
-          shape: "roundrectangle",
-        },
-      },
-      // ── Test nodes (floating, no parent box) ──
-      {
-        selector: "node[type='test']",
-        style: {
-          "background-color": "#48bb78",
-          "border-color": "#68d391",
-          label: "data(label)",
-          "text-valign": "bottom",
-          "text-halign": "center",
-          "font-size": "10px",
-          color: textColor,
-          "text-outline-width": 2,
+          "font-size": "22px",
+          "font-weight": "800",
+          color: "data(moduleColorBorder)",
+          "text-outline-width": 3,
           "text-outline-color": outlineColor,
-          "text-margin-y": 4,
-          shape: "diamond",
-          width: 22,
-          height: 22,
-          "border-width": 2,
+          "text-opacity": 0.9,
+          width: 60,
+          height: 60,
+          shape: "ellipse",
+          "events": "no",
         },
       },
+      // ── Function nodes ──
       {
         selector: "node[type='function']",
         style: {
           "background-color": "data(moduleColorBg)",
           "border-color": "data(moduleColorBorder)",
-          label: "data(label)",
+          label: "",
           "text-valign": "bottom",
           "text-halign": "center",
-          "font-size": "10px",
+          "font-size": "14px",
+          "font-weight": "600",
           color: textColor,
           "text-outline-width": 2,
           "text-outline-color": outlineColor,
@@ -456,6 +457,26 @@
           "border-width": 2,
           "transition-property": "background-color, border-color, opacity, width, height",
           "transition-duration": "0.2s",
+        },
+      },
+      // ── Test nodes ──
+      {
+        selector: "node[type='test']",
+        style: {
+          "background-color": "#48bb78",
+          "border-color": "#68d391",
+          label: "",
+          "text-valign": "bottom",
+          "text-halign": "center",
+          "font-size": "13px",
+          color: textColor,
+          "text-outline-width": 2,
+          "text-outline-color": outlineColor,
+          "text-margin-y": 4,
+          shape: "diamond",
+          width: 20,
+          height: 20,
+          "border-width": 2,
         },
       },
       // Shape by function kind
@@ -471,29 +492,29 @@
       // ── Impact level overrides ──
       {
         selector: "node[impactLevel='selected']",
-        style: { "background-color": "#f6e05e", "border-color": "#faf089", "border-width": 3, width: 36, height: 36, "z-index": 10 },
+        style: { "background-color": "#f6e05e", "border-color": "#faf089", "border-width": 3, width: 36, height: 36, "z-index": 10, label: "data(label)" },
       },
       {
         selector: "node[impactLevel='high']",
-        style: { "background-color": "#fc8181", "border-color": "#feb2b2", "border-width": 2.5 },
+        style: { "background-color": "#fc8181", "border-color": "#feb2b2", "border-width": 2.5, label: "data(label)" },
       },
       {
         selector: "node[impactLevel='medium']",
-        style: { "background-color": "#f6ad55", "border-color": "#fbd38d", "border-width": 2 },
+        style: { "background-color": "#f6ad55", "border-color": "#fbd38d", "border-width": 2, label: "data(label)" },
       },
       {
         selector: "node[impactLevel='low']",
-        style: { "background-color": "#76e4f7", "border-color": "#b2f5ea", "border-width": 1.5 },
+        style: { "background-color": "#76e4f7", "border-color": "#b2f5ea", "border-width": 1.5, label: "data(label)" },
       },
       {
         selector: "node[impactLevel='test']",
-        style: { "background-color": "#68d391", "border-color": "#9ae6b4", "border-width": 2 },
+        style: { "background-color": "#68d391", "border-color": "#9ae6b4", "border-width": 2, label: "data(label)" },
       },
       {
         selector: "node[impactLevel='dimmed']",
         style: { opacity: 0.15 },
       },
-      // ── Edges ──
+      // ── Edges — hidden by default, shown on blast radius click ──
       {
         selector: "edge",
         style: {
@@ -502,7 +523,7 @@
           "target-arrow-color": "#4a5568",
           "target-arrow-shape": "triangle",
           "curve-style": "bezier",
-          opacity: 0.6,
+          opacity: 0,
           "transition-property": "line-color, opacity",
           "transition-duration": "0.2s",
         },
@@ -522,6 +543,19 @@
       {
         selector: "edge.dimmed",
         style: { opacity: 0.05, "z-index": 0 },
+      },
+      // ── Search highlight ──
+      {
+        selector: "node.search-match",
+        style: { "border-width": 3, "border-color": "#f6e05e", "z-index": 10 },
+      },
+      {
+        selector: "node.search-dimmed",
+        style: { opacity: 0.15 },
+      },
+      {
+        selector: "edge.search-dimmed",
+        style: { opacity: 0.05 },
       },
     ];
   }
@@ -544,8 +578,11 @@
 
     cy.nodes().forEach(function (node) {
       var id = node.id();
-      // Skip parent file boxes — they inherit opacity from children
-      if (node.data("type") === "file" || node.data("type") === "file-test") { return; }
+      // Module labels just dim
+      if (node.data("type") === "module-label") {
+        node.data("impactLevel", "dimmed");
+        return;
+      }
       if (id === data.selectedNodeId) {
         node.data("impactLevel", "selected");
       } else if (testSet.has(id)) {
@@ -632,7 +669,7 @@
     }
 
     var dimmedNodes = cy.nodes().filter(function (n) {
-      return n.data("impactLevel") === "dimmed" && n.data("type") !== "file" && n.data("type") !== "file-test";
+      return n.data("impactLevel") === "dimmed";
     });
     var outerR = ringRadii[3] + 80;
     dimmedNodes.forEach(function (node, i) {
@@ -647,13 +684,26 @@
     if (!cy) { return; }
     selectedNodeId = null;
     cy.nodes().forEach(function (n) {
-      if (n.data("type") !== "file" && n.data("type") !== "file-test") {
-        n.data("impactLevel", "none");
-      }
+      n.data("impactLevel", "none");
     });
-    cy.edges().removeClass("highlighted dimmed callee-edge caller-edge");
+    cy.edges().removeClass("highlighted callee-edge caller-edge dimmed");
     clearSidebar();
     showModuleLegend();
+    if (window.__savedPositions) {
+      cy.animate({ positions: window.__savedPositions, duration: 400, easing: "ease-in-out-cubic" });
+    }
+  }
+
+  // ── Stats bar ──
+
+  function populateStatsBar(data) {
+    var el = document.getElementById("stats-content");
+    if (!el) { return; }
+    var funcs = data.nodes ? data.nodes.length : 0;
+    var tests = data.testFiles ? data.testFiles.length : 0;
+    var mods = data.featureModules ? data.featureModules.length : 0;
+    var edges = data.edges ? data.edges.length : 0;
+    el.innerHTML = '<span>' + funcs + '</span> functions · <span>' + tests + '</span> tests · <span>' + mods + '</span> modules · <span>' + edges + '</span> call edges';
   }
 
   // ── Legend ──
@@ -673,26 +723,9 @@
   }
 
   function buildModuleLegend() {
-    var COLORS = [
-      "#4299e1", "#ed8936", "#9f7aea", "#e53e3e", "#38b2ac",
-      "#d69e2e", "#dd6b20", "#3182ce", "#805ad5", "#e53e3e",
-    ];
+    // Module colors are now shown via cluster labels — no need in legend
     var container = document.getElementById("module-legend");
-    if (!container || !window.__blastModules) { return; }
-    container.innerHTML = "";
-    for (var i = 0; i < window.__blastModules.length; i++) {
-      var mod = window.__blastModules[i];
-      var idx = window.__blastModuleColors[mod] || 0;
-      var item = document.createElement("div");
-      item.className = "legend-item";
-      item.innerHTML = '<div class="legend-dot" style="background:' + COLORS[idx] + '"></div> ' + mod + '/';
-      container.appendChild(item);
-    }
-    // Test files in module column
-    var testItem = document.createElement("div");
-    testItem.className = "legend-item";
-    testItem.innerHTML = '<div class="legend-dot dot-green" style="clip-path:polygon(50% 0%,100% 50%,50% 100%,0% 50%)"></div> test files';
-    container.appendChild(testItem);
+    if (container) { container.innerHTML = ""; }
 
     // Shapes column
     var shapesContainer = document.getElementById("shapes-legend");
@@ -703,6 +736,7 @@
         { label: "internal fn", html: '<div style="width:14px;height:14px;border-radius:50%;background:transparent;border:2px solid #888"></div>' },
         { label: "exported method", html: '<div style="width:14px;height:14px;border-radius:3px;background:#888"></div>' },
         { label: "internal method", html: '<div style="width:14px;height:14px;border-radius:3px;background:transparent;border:2px solid #888"></div>' },
+        { label: "test file", html: '<div style="width:14px;height:14px;background:#68d391;clip-path:polygon(50% 0%,100% 50%,50% 100%,0% 50%)"></div>' },
       ];
       for (var s = 0; s < shapes.length; s++) {
         var sItem = document.createElement("div");
@@ -796,7 +830,7 @@
 
   function clearSidebar() {
     document.getElementById("epicenter-label").style.display = "none";
-    document.getElementById("sidebar-empty").style.display = "block";
+    document.getElementById("sidebar-empty").style.display = "none";
     document.getElementById("sidebar-content").style.display = "none";
     document.getElementById("sidebar").classList.remove("visible");
   }
@@ -824,5 +858,345 @@
     var isMinimized = legend.classList.toggle("minimized");
     this.textContent = isMinimized ? "▸ legend" : "▾ legend";
   });
+
+  // ── Search ──
+
+  var activeResultIndex = -1;
+  var currentResults = [];
+
+  var CATEGORY_BADGES = {
+    "function": "ƒ",
+    "test": "⬡",
+    "module": "▣"
+  };
+
+  var CATEGORY_ORDER = { "function": 0, "test": 1, "module": 2 };
+
+  function renderHighlightedText(text, matches) {
+    if (!matches || matches.length === 0) {
+      return escapeHtml(text);
+    }
+    var matchSet = {};
+    for (var i = 0; i < matches.length; i++) {
+      matchSet[matches[i]] = true;
+    }
+    var html = "";
+    for (var j = 0; j < text.length; j++) {
+      var ch = escapeHtml(text[j]);
+      if (matchSet[j]) {
+        html += "<mark>" + ch + "</mark>";
+      } else {
+        html += ch;
+      }
+    }
+    return html;
+  }
+
+  function escapeHtml(str) {
+    return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+
+  function renderSearchResults(results) {
+    var resultsList = document.getElementById("search-results");
+    resultsList.innerHTML = "";
+    activeResultIndex = -1;
+    currentResults = results;
+
+    if (results.length === 0) {
+      var noResults = document.createElement("li");
+      noResults.className = "search-no-results";
+      noResults.textContent = "No results found";
+      resultsList.appendChild(noResults);
+      resultsList.style.display = "block";
+      return;
+    }
+
+    // Sort by category order, preserving score order within each category
+    var grouped = results.slice().sort(function (a, b) {
+      var catA = CATEGORY_ORDER[a.item.category] || 0;
+      var catB = CATEGORY_ORDER[b.item.category] || 0;
+      if (catA !== catB) { return catA - catB; }
+      return 0; // preserve score order within category
+    });
+
+    currentResults = grouped;
+
+    for (var i = 0; i < grouped.length; i++) {
+      var result = grouped[i];
+      var li = document.createElement("li");
+      li.className = "search-result-item";
+      li.setAttribute("data-index", i);
+
+      var badge = document.createElement("span");
+      badge.className = "search-category-badge";
+      badge.textContent = CATEGORY_BADGES[result.item.category] || "";
+
+      var primary = document.createElement("span");
+      primary.className = "search-primary";
+      primary.innerHTML = renderHighlightedText(result.item.label, result.labelMatches);
+
+      li.appendChild(badge);
+      li.appendChild(primary);
+
+      if (result.item.secondaryLabel) {
+        var secondary = document.createElement("span");
+        secondary.className = "search-secondary";
+        secondary.innerHTML = renderHighlightedText(result.item.secondaryLabel, result.secondaryMatches);
+        li.appendChild(secondary);
+      }
+
+      (function (idx) {
+        li.addEventListener("click", function () {
+          selectSearchResult(currentResults[idx].item);
+        });
+      })(i);
+
+      resultsList.appendChild(li);
+    }
+
+    resultsList.style.display = "block";
+  }
+
+  function highlightSearchMatches(results) {
+    if (!cy) { return; }
+    if (!results || results.length === 0) {
+      clearSearchHighlight();
+      return;
+    }
+
+    // Collect IDs of all matched items
+    var matchedIds = {};
+    for (var i = 0; i < results.length; i++) {
+      var item = results[i].item;
+      matchedIds[item.id] = true;
+    }
+
+    // Highlight matched nodes, dim everything else, show labels on matches
+    cy.nodes().forEach(function (node) {
+      var nodeType = node.data("type");
+      if (nodeType === "file" || nodeType === "module-label") { return; }
+      var id = node.id();
+      if (matchedIds[id]) {
+        node.addClass("search-match");
+        node.removeClass("search-dimmed");
+        node.style("label", node.data("label"));
+      } else {
+        node.addClass("search-dimmed");
+        node.removeClass("search-match");
+        node.style("label", "");
+      }
+    });
+
+    cy.edges().forEach(function (edge) {
+      var src = edge.source().id();
+      var tgt = edge.target().id();
+      if (matchedIds[src] || matchedIds[tgt]) {
+        edge.removeClass("search-dimmed");
+      } else {
+        edge.addClass("search-dimmed");
+      }
+    });
+  }
+
+  function clearSearchHighlight() {
+    if (!cy) { return; }
+    cy.nodes().removeClass("search-match search-dimmed");
+    cy.edges().removeClass("search-dimmed");
+    // Hide labels again on function/test nodes
+    cy.nodes("[type='function'], [type='test']").forEach(function (node) {
+      var impact = node.data("impactLevel");
+      if (!impact || impact === "none" || impact === "dimmed") {
+        node.style("label", "");
+      }
+    });
+  }
+
+  document.getElementById("search-input").addEventListener("input", function () {
+    var query = this.value;
+    var resultsList = document.getElementById("search-results");
+
+    if (!query || !query.trim()) {
+      resultsList.style.display = "none";
+      resultsList.innerHTML = "";
+      currentResults = [];
+      activeResultIndex = -1;
+      clearSearchHighlight();
+      return;
+    }
+
+    if (!searchIndex) {
+      resultsList.style.display = "none";
+      return;
+    }
+
+    var results = SearchEngine.fuzzySearch(query, searchIndex);
+    renderSearchResults(results);
+    highlightSearchMatches(results);
+  });
+
+  // ── Keyboard navigation ──
+
+  function updateActiveResult(newIndex) {
+    var items = document.querySelectorAll(".search-result-item");
+    if (items.length === 0) { return; }
+
+    // Remove current active
+    if (activeResultIndex >= 0 && activeResultIndex < items.length) {
+      items[activeResultIndex].classList.remove("active");
+    }
+
+    activeResultIndex = newIndex;
+
+    if (activeResultIndex >= 0 && activeResultIndex < items.length) {
+      items[activeResultIndex].classList.add("active");
+      items[activeResultIndex].scrollIntoView({ block: "nearest" });
+    }
+  }
+
+  document.addEventListener("keydown", function (e) {
+    var searchInput = document.getElementById("search-input");
+
+    // `/` key: focus search input when not already focused and not typing in another input
+    if (e.key === "/" && document.activeElement !== searchInput &&
+        document.activeElement.tagName !== "INPUT" &&
+        document.activeElement.tagName !== "TEXTAREA") {
+      e.preventDefault();
+      expandSearch();
+      searchInput.focus();
+      return;
+    }
+
+    // `Escape` key: clear and blur search input
+    if (e.key === "Escape" && document.activeElement === searchInput) {
+      searchInput.value = "";
+      document.getElementById("search-results").style.display = "none";
+      currentResults = [];
+      activeResultIndex = -1;
+      clearSearchHighlight();
+      searchInput.blur();
+      searchContainer.classList.remove("expanded");
+      return;
+    }
+  });
+
+  document.getElementById("search-input").addEventListener("keydown", function (e) {
+    var resultsList = document.getElementById("search-results");
+    if (resultsList.style.display === "none") { return; }
+
+    var items = document.querySelectorAll(".search-result-item");
+    if (items.length === 0) { return; }
+
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      var nextIndex = activeResultIndex + 1;
+      if (nextIndex >= items.length) { nextIndex = 0; }
+      updateActiveResult(nextIndex);
+      return;
+    }
+
+    if (e.key === "ArrowUp") {
+      e.preventDefault();
+      var prevIndex = activeResultIndex - 1;
+      if (prevIndex < 0) { prevIndex = items.length - 1; }
+      updateActiveResult(prevIndex);
+      return;
+    }
+
+    if (e.key === "Enter") {
+      e.preventDefault();
+      var selectIdx = activeResultIndex >= 0 ? activeResultIndex : 0;
+      if (currentResults[selectIdx]) {
+        selectSearchResult(currentResults[selectIdx].item);
+      }
+      return;
+    }
+  });
+
+  // ── Event isolation ──
+
+  var searchContainer = document.getElementById("search-container");
+
+  // ── Search expand/collapse ──
+
+  function expandSearch() {
+    searchContainer.classList.add("expanded");
+  }
+
+  function collapseSearch() {
+    var searchInput = document.getElementById("search-input");
+    if (!searchInput.value) {
+      searchContainer.classList.remove("expanded");
+    }
+  }
+
+  document.getElementById("search-input").addEventListener("focus", function () {
+    expandSearch();
+  });
+
+  document.getElementById("search-input").addEventListener("blur", function () {
+    // Delay collapse to allow click on results
+    setTimeout(function () {
+      collapseSearch();
+    }, 200);
+  });
+
+  // Clicking the collapsed container (icon area) expands and focuses
+  searchContainer.addEventListener("click", function (e) {
+    e.stopPropagation();
+    var searchInput = document.getElementById("search-input");
+    if (!searchContainer.classList.contains("expanded")) {
+      expandSearch();
+      searchInput.focus();
+    }
+  });
+
+  searchContainer.addEventListener("mousedown", function (e) {
+    e.stopPropagation();
+  });
+
+  document.addEventListener("click", function (e) {
+    if (!searchContainer.contains(e.target)) {
+      document.getElementById("search-results").style.display = "none";
+      activeResultIndex = -1;
+    }
+  });
+
+  // ── Result selection and graph navigation ──
+
+  function selectSearchResult(item) {
+    if (!cy || !item) { return; }
+
+    if (item.category === "function") {
+      var node = cy.getElementById(item.id);
+      if (node && node.length > 0) {
+        cy.center(node);
+        cy.zoom({ level: 1.2, position: node.position() });
+        vscodeApi.postMessage({ type: "node-click", nodeId: item.id });
+      }
+    } else if (item.category === "test") {
+      var testNode = cy.getElementById(item.id);
+      if (testNode && testNode.length > 0) {
+        cy.center(testNode);
+        cy.zoom({ level: 1.2, position: testNode.position() });
+      }
+    } else if (item.category === "module") {
+      var moduleNodes = cy.nodes().filter(function (n) {
+        return n.data("module") === item.id;
+      });
+      if (moduleNodes.length > 0) {
+        cy.fit(moduleNodes, 60);
+      }
+    }
+
+    // Clear search UI after selection
+    var searchInput = document.getElementById("search-input");
+    searchInput.value = "";
+    document.getElementById("search-results").style.display = "none";
+    currentResults = [];
+    activeResultIndex = -1;
+    clearSearchHighlight();
+    searchInput.blur();
+    searchContainer.classList.remove("expanded");
+  }
 
 })();
