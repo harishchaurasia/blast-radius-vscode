@@ -120,7 +120,7 @@
       }
     });
 
-    // Show label on hover for function and test nodes
+    // Show labels on hover for function and test nodes
     cy.on("mouseover", "node[type='function'], node[type='test']", function (event) {
       var node = event.target;
       if (!node.data("impactLevel") || node.data("impactLevel") === "none" || node.data("impactLevel") === "dimmed") {
@@ -131,8 +131,30 @@
       var node = event.target;
       var impact = node.data("impactLevel");
       if (!impact || impact === "none" || impact === "dimmed") {
-        node.style("label", "");
+        if (cy.zoom() < 1.0) {
+          node.style("label", "");
+        }
       }
+    });
+
+    // Zoom-based labels: fade in labels as you zoom in
+    var ZOOM_LABEL_START = 1.0;  // labels start fading in
+    var ZOOM_LABEL_FULL = 1.5;   // labels fully visible
+
+    cy.on("zoom", function () {
+      var zoom = cy.zoom();
+      var t = Math.max(0, Math.min(1, (zoom - ZOOM_LABEL_START) / (ZOOM_LABEL_FULL - ZOOM_LABEL_START)));
+      cy.nodes("[type='function'], [type='test']").forEach(function (node) {
+        var impact = node.data("impactLevel");
+        if (impact && impact !== "none" && impact !== "dimmed") { return; }
+        if (t <= 0) {
+          node.style("label", "");
+          node.style("text-opacity", 1);
+        } else {
+          node.style("label", node.data("label"));
+          node.style("text-opacity", t);
+        }
+      });
     });
 
     runLayout();
