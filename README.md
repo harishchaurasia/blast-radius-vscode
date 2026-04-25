@@ -1,71 +1,150 @@
-# blast-radius README
+# Blast Radius
 
-This is the README for your extension "blast-radius". After writing up a brief description, we recommend including the following sections.
+Visualize the blast radius of any code change in a TypeScript project. This VSCode extension parses your TypeScript codebase, builds a call graph, maps test files to source functions, and renders an interactive graph in a webview panel.
 
 ## Features
 
-Describe specific features of your extension including screenshots of your extension in action. Image paths are relative to this README file.
+- **Call Graph Visualization** — Parses all TypeScript files under `src/` and renders function call relationships using Cytoscape.js with a hierarchical dagre layout.
+- **Blast Radius Analysis** — Click any function node to see its upstream callers (purple), downstream callees (red), and linked test files (green).
+- **Impact Summary Sidebar** — Shows affected function count, recommended test files to run, and at-risk feature modules.
+- **Test Mapping** — Automatically discovers `*.test.ts` and `*.spec.ts` files and maps them to source functions transitively through the call graph.
+- **Data Privacy** — All analysis runs locally. A strict Content Security Policy ensures no data leaves the extension.
 
-For example if there is an image subfolder under your extension project workspace:
+### Node Types
 
-\!\[feature X\]\(images/feature-x.png\)
+| Shape | Color | Meaning |
+|-------|-------|---------|
+| Circle | Blue | Source function |
+| Diamond | Green | Test file |
+| Rectangle | Orange | Feature module |
 
-> Tip: Many popular extensions utilize animations. This is an excellent way to show off your extension! We recommend short, focused animations that are easy to follow.
+### Highlight Colors (on click)
 
-## Requirements
+| Color | Meaning |
+|-------|---------|
+| Gold | Selected node |
+| Red | Downstream (functions called by selected) |
+| Purple | Upstream (functions that call selected) |
+| Green | Linked test files |
+| Dimmed | Unrelated nodes |
 
-If you have any requirements or dependencies, add a section describing those and how to install and configure them.
+## Prerequisites
 
-## Extension Settings
+- [Node.js](https://nodejs.org/) v18 or later
+- [VSCode](https://code.visualstudio.com/) v1.107.0+ or [Kiro](https://kiro.dev/)
 
-Include if your extension adds any VS Code settings through the `contributes.configuration` extension point.
+## Setup
 
-For example:
+```bash
+# Clone the repository
+git clone https://github.com/harishchaurasia/blast-radius-vscode.git
+cd blast-radius-vscode
 
-This extension contributes the following settings:
+# Install dependencies
+npm install
 
-* `myExtension.enable`: Enable/disable this extension.
-* `myExtension.thing`: Set to `blah` to do something.
+# Compile TypeScript
+npm run compile
+```
 
-## Known Issues
+## How to Run
 
-Calling out known issues can help limit users opening duplicate issues against your extension.
+### Step 1: Launch the Extension Development Host
 
-## Release Notes
+1. Open the `blast-radius-vscode` folder in VSCode or Kiro
+2. Press **F5** — this compiles the extension and opens a new VSCode window (the Extension Development Host)
 
-Users appreciate release notes as you update your extension.
+### Step 2: Open a TypeScript Project
 
-### 1.0.0
+In the **new Extension Development Host window**:
 
-Initial release of ...
+1. Go to **File → Open Folder**
+2. Select any TypeScript project that has a `tsconfig.json` and a `src/` directory
+3. Click **Select Folder**
 
-### 1.0.1
+### Step 3: Run the Extension
 
-Fixed issue #.
+1. Press **Ctrl+Shift+P** (or **Cmd+Shift+P** on Mac) to open the Command Palette
+2. Type `Blast Radius: Open Graph`
+3. Press **Enter**
 
-### 1.1.0
+A panel will open beside your editor showing the interactive call graph.
 
-Added features X, Y, and Z.
+### Step 4: Explore the Graph
 
----
+- **Pan and zoom** the graph using your mouse
+- **Click any node** to see its blast radius — the Impact Summary sidebar will show affected functions, recommended tests, and at-risk modules
+- **Click a different node** to update the view
 
-## Following extension guidelines
+### Step 5: Stop
 
-Ensure that you've read through the extensions guidelines and follow the best practices for creating your extension.
+- Close the Extension Development Host window, or press **Shift+F5** in the original window
 
-* [Extension Guidelines](https://code.visualstudio.com/api/references/extension-guidelines)
+## Using the Sample Test Project
 
-## Working with Markdown
+A sample TypeScript project is included for testing. If you need one, create it at any location with this structure:
 
-You can author your README using Visual Studio Code. Here are some useful editor keyboard shortcuts:
+```
+test-ts-project/
+  tsconfig.json
+  src/
+    utils/
+      math.ts          — add, subtract, multiply, clamp
+      formatter.ts     — formatCurrency, formatPercent, truncate
+    cart/
+      discount.ts      — computeDiscount, applyPromoCode
+      cartCalculator.ts — calculateItemTotal, calculateSubtotal, calculateTotal
+    order/
+      orderValidator.ts — isValidItem, validateCart
+      orderService.ts   — OrderService class with createOrder, confirmOrder
+    test/
+      cartCalculator.test.ts
+      orderService.test.ts
+```
 
-* Split the editor (`Cmd+\` on macOS or `Ctrl+\` on Windows and Linux).
-* Toggle preview (`Shift+Cmd+V` on macOS or `Shift+Ctrl+V` on Windows and Linux).
-* Press `Ctrl+Space` (Windows, Linux, macOS) to see a list of Markdown snippets.
+## Running Tests
 
-## For more information
+```bash
+# Run all tests (compiles, lints, then runs test suite)
+npm test
 
-* [Visual Studio Code's Markdown Support](http://code.visualstudio.com/docs/languages/markdown)
-* [Markdown Syntax Reference](https://help.github.com/articles/markdown-basics/)
+# Compile only
+npm run compile
 
-**Enjoy!**
+# Lint only
+npm run lint
+```
+
+## Project Structure
+
+```
+src/
+  extension.ts              — Entry point, registers the blast-radius.open command
+  types.ts                  — Core TypeScript interfaces
+  parser/
+    codeParser.ts           — AST walker that extracts functions and call edges
+    testMapper.ts           — Maps test files to source functions transitively
+  graph/
+    graphBuilder.ts         — Builds the in-memory call graph with adjacency lists
+    serialization.ts        — Serializes/deserializes graph data for webview transport
+  analysis/
+    impactEngine.ts         — BFS-based blast radius computation
+  webview/
+    webviewProvider.ts      — Manages the webview panel lifecycle and messaging
+media/
+  graph.js                  — Cytoscape.js client running in the webview
+  cytoscape.min.js          — Cytoscape.js library
+  cytoscape-dagre.js        — Dagre layout plugin for Cytoscape
+  dagre.js                  — Dagre graph layout library
+```
+
+## Known Limitations
+
+- Only parses `.ts` files under the `src/` directory
+- Skips dynamic calls: `eval()`, string-keyed property access (`obj["method"]()`), framework-injected callbacks
+- Namespace imports (`import * as ns`) are not resolved to individual functions
+- Requires a `tsconfig.json` at the workspace root
+
+## License
+
+See [LICENSE](LICENSE) for details.
