@@ -33,7 +33,7 @@ Implement the Blast Radius VSCode extension that parses TypeScript projects, bui
     - Return `ParseResult` with `nodes` and `edges` arrays
     - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5_
 
-  - [ ]* 2.2 Write unit tests for Code Parser
+  - [x]* 2.2 Write unit tests for Code Parser
     - Create `src/test/parser/codeParser.test.ts`
     - Test extraction of named functions, arrow functions, class methods, and exported functions
     - Test call edge detection between functions
@@ -52,7 +52,7 @@ Implement the Blast Radius VSCode extension that parses TypeScript projects, bui
     - Must complete construction for a project with 100 source files in 10 seconds or less
     - _Requirements: 3.1, 3.2, 3.3_
 
-  - [ ]* 3.2 Write unit tests for Graph Builder
+  - [x]* 3.2 Write unit tests for Graph Builder
     - Create `src/test/graph/graphBuilder.test.ts`
     - Test deduplication of nodes with same ID
     - Test forward and reverse adjacency construction
@@ -71,7 +71,7 @@ Implement the Blast Radius VSCode extension that parses TypeScript projects, bui
     - Build `TestMap`: map from test file path to the union of direct imports + transitive callees
     - _Requirements: 4.1, 4.2, 5.1, 5.3_
 
-  - [ ]* 4.2 Write unit tests for Test Mapper
+  - [x]* 4.2 Write unit tests for Test Mapper
     - Create `src/test/parser/testMapper.test.ts`
     - Test direct import resolution to graph nodes
     - Test transitive expansion through call graph
@@ -93,7 +93,7 @@ Implement the Blast Radius VSCode extension that parses TypeScript projects, bui
     - Return `BlastRadiusResult`
     - _Requirements: 5.2, 8.2, 8.6, 9.1, 9.2, 9.3, 9.4, 10.1, 10.2_
 
-  - [ ]* 6.2 Write unit tests for Impact Engine
+  - [x]* 6.2 Write unit tests for Impact Engine
     - Create `src/test/analysis/impactEngine.test.ts`
     - Test downstream BFS traversal
     - Test upstream BFS traversal
@@ -111,7 +111,7 @@ Implement the Blast Radius VSCode extension that parses TypeScript projects, bui
     - Ensure round-trip fidelity: same nodes and edges after serialize → deserialize
     - _Requirements: 12.1, 12.2, 12.3_
 
-  - [ ]* 7.2 Write unit tests for serialization round-trip
+  - [x]* 7.2 Write unit tests for serialization round-trip
     - Create `src/test/graph/serialization.test.ts`
     - Test that serializing and deserializing a `CallGraph` produces the same set of nodes and edges
     - Test empty graph round-trip
@@ -176,7 +176,7 @@ Implement the Blast Radius VSCode extension that parses TypeScript projects, bui
 - [x] 11. Checkpoint — Full integration
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ]* 12. Write integration tests for the full pipeline
+- [x]* 12. Write integration tests for the full pipeline
   - Create `src/test/integration/pipeline.test.ts`
   - Test end-to-end: parse a small fixture project → build graph → build test map → compute blast radius
   - Verify that blast radius results include expected downstream, upstream, and test file sets
